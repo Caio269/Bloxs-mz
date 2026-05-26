@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, FormEvent } from "react";
 import { onAuthStateChanged, signOut, User as FirebaseUser } from "firebase/auth";
-import { ref, get, set, update } from "firebase/database";
+import { ref, get, set, update, runTransaction, query as rtdbQuery, orderByChild, equalTo } from "firebase/database";
 import { auth, rtdb, isMockMode } from "./firebase";
 import Login from "./components/Login";
 
@@ -1027,20 +1027,12 @@ function EquipaTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => void
     setAdding(true);
 
     try {
-      // Impede que o admin se adicione a si próprio
       if (inputId === user.id) {
         setIdError("Não podes adicionar o teu próprio ID.");
         return;
       }
 
-      // Verifica se já está na equipa
-      const jaExiste = user.teamMembers.some(m => m.name === inputId);
-      if (jaExiste) {
-        setIdError("Este utilizador já faz parte da tua equipa.");
-        return;
-      }
-
-      // Consulta o Realtime Database para verificar se o ID existe
+      // Consulta o Firebase para verificar se o ID existe
       const q = rtdbQuery(ref(rtdb, "usuarios"), orderByChild("id"), equalTo(inputId));
       const snap = await get(q);
 
@@ -1049,26 +1041,60 @@ function EquipaTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => void
         return;
       }
 
-      // ID existe — obtém o nome real do utilizador (primeiro resultado)
-      const allMatches = snap.val() as Record<string, { nome?: string }>;
+      const allMatches = snap.val() as Record<string, { nome?: string; equipa?: Record<string, { uid?: string }> }>;
+      const memberUid = Object.keys(allMatches)[0];
       const memberData = Object.values(allMatches)[0];
       const memberName: string = memberData.nome ?? inputId;
 
-      // Credita o bónus e adiciona à equipa
+      // Verifica se já está na equipa (por uid ou nome)
+      const equipaExistente = memberData.equipa ?? {};
+      const jaExisteNome = user.teamMembers.some(m => m.name === memberName);
+      const jaExisteUid = Object.values(equipaExistente).some(m => m.uid === memberUid);
+      if (jaExisteNome || jaExisteUid) {
+        setIdError("Este utilizador já faz parte da tua equipa.");
+        return;
+      }
+
+      const joinDate = new Date().toISOString();
+      const planName = PLANS[Math.floor(Math.random() * PLANS.length)].name;
+      const newMember: TeamMember = { name: memberName, joinDate, plan: planName };
+      const txId = `ref_admin_${memberUid.slice(0, 8)}_${Date.now()}`;
+      const membroId = `mem_${memberUid.slice(0, 8)}`;
+
+      if (!isMockMode) {
+        // Descobre o UID do admin no Firebase pelo email
+        const adminQ = rtdbQuery(ref(rtdb, "usuarios"), orderByChild("id"), equalTo(user.id));
+        const adminSnap = await get(adminQ);
+        if (adminSnap.exists()) {
+          const adminUid = Object.keys(adminSnap.val())[0];
+
+          await runTransaction(ref(rtdb, `usuarios/${adminUid}/saldo`), (s) => Number(s || 0) + 50);
+
+          await set(ref(rtdb, `usuarios/${adminUid}/equipa/${membroId}`), {
+            uid: memberUid,
+            name: memberName,
+            joinDate,
+            plan: planName,
+          });
+
+          await set(ref(rtdb, `usuarios/${adminUid}/transacoes/${txId}`), {
+            id: txId,
+            type: "credit",
+            amount: 50,
+            description: `Bónus de referência — ${memberName} (ID: ${inputId})`,
+            date: joinDate,
+          });
+        }
+      }
+
+      // Actualiza localStorage como cache
       const updated = { ...user };
-      const newMember: TeamMember = {
-        name: memberName,
-        joinDate: new Date().toISOString(),
-        plan: PLANS[Math.floor(Math.random() * PLANS.length)].name,
-      };
       updated.teamMembers = [newMember, ...updated.teamMembers];
       updated.balance += 50;
       updated.transactions = [
-        {
-          id: genId(), type: "credit", amount: 50,
+        { id: txId, type: "credit", amount: 50,
           description: `Bónus de referência — ${memberName} (ID: ${inputId})`,
-          date: new Date().toISOString(),
-        },
+          date: joinDate },
         ...updated.transactions,
       ];
       const users = loadUsers();

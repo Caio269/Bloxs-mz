@@ -5,7 +5,7 @@ import {
   updateProfile,
   AuthError,
 } from "firebase/auth";
-import { ref, set, get, update, runTransaction, query as rtdbQuery, orderByChild, equalTo, push } from "firebase/database";
+import { ref, set, get, update, runTransaction, query as rtdbQuery, orderByChild, equalTo } from "firebase/database";
 import { auth, rtdb } from "../firebase";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -111,11 +111,11 @@ export default function Login({ onSuccess, isMockMode = false, onMockLogin }: Pr
       });
 
       // ── Bónus de referência ──────────────────────────────────────────────────
-      // Se o novo utilizador veio de um link de convite, credita +50 MT ao padrinho
+      // Credita +50 MT ao padrinho assim que o indicado cria conta,
+      // independentemente do plano activo do padrinho.
       const padrinhoID = localStorage.getItem("padrinhoID");
-      if (padrinhoID) {
+      if (padrinhoID && padrinhoID !== firebaseUser.uid.slice(0, 9).toUpperCase()) {
         try {
-          // Procura o padrinho pelo ID no Realtime Database
           const q = rtdbQuery(ref(rtdb, "usuarios"), orderByChild("id"), equalTo(padrinhoID));
           const padrinhoSnap = await get(q);
 
@@ -123,36 +123,53 @@ export default function Login({ onSuccess, isMockMode = false, onMockLogin }: Pr
             const padrinhoUid = Object.keys(padrinhoSnap.val())[0];
             const padrinhoData: any = Object.values(padrinhoSnap.val())[0];
 
-            const temPlanoAtivo =
-              padrinhoData?.planos?.ferro?.ativo ||
-              padrinhoData?.planos?.cox?.ativo ||
-              padrinhoData?.planos?.sc?.ativo;
+            // Previne duplicados: verifica se este indicado já está na equipa
+            const equipaExistente: Record<string, any> = padrinhoData?.equipa ?? {};
+            const jaIndicado = Object.values(equipaExistente).some(
+              (m: any) => m.uid === firebaseUser.uid
+            );
 
-            if (temPlanoAtivo) {
+            if (!jaIndicado) {
+              const txId = `ref_${firebaseUser.uid.slice(0, 8)}_${Date.now()}`;
+              const membroId = `mem_${firebaseUser.uid.slice(0, 8)}`;
+
+              // 1. Actualiza o saldo atomicamente
               await runTransaction(ref(rtdb, `usuarios/${padrinhoUid}/saldo`), (saldoAtual) => {
                 return Number(saldoAtual || 0) + 50;
               });
 
-              await push(ref(rtdb, `usuarios/${padrinhoUid}/equipa`), {
+              // 2. Adiciona o novo membro à equipa com chave estável (uid do indicado)
+              await set(ref(rtdb, `usuarios/${padrinhoUid}/equipa/${membroId}`), {
+                uid: firebaseUser.uid,
                 name: name.trim(),
                 joinDate: new Date().toISOString(),
                 plan: "Novo membro",
               });
 
-              await push(ref(rtdb, `usuarios/${padrinhoUid}/transacoes`), {
-                id: `ref_${Date.now()}`,
+              // 3. Regista a transacção com chave estável
+              await set(ref(rtdb, `usuarios/${padrinhoUid}/transacoes/${txId}`), {
+                id: txId,
                 type: "credit",
                 amount: 50,
                 description: `Bónus de referência — ${name.trim()}`,
                 date: new Date().toISOString(),
               });
+
+              // 4. Marca no perfil do novo utilizador quem o indicou
+              await update(ref(rtdb, `usuarios/${firebaseUser.uid}`), {
+                padrinhoId: padrinhoID,
+                padrinhoUid,
+              });
             }
 
             localStorage.removeItem("padrinhoID");
+          } else {
+            // ID de padrinho inválido — limpa o localStorage
+            localStorage.removeItem("padrinhoID");
           }
-        } catch {
+        } catch (refErr) {
+          console.error("Erro ao creditar bónus de referência:", refErr);
           // Falha silenciosa — o registo do utilizador já foi bem-sucedido
-          // o bónus pode ser aplicado manualmente pelo admin se necessário
           localStorage.removeItem("padrinhoID");
         }
       }
