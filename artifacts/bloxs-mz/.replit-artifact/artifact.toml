@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Bloxs mz"
+version = "1.0.0"
+id = "artifacts/bloxs-mz"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23113
+
+[services.development]
+run = "pnpm --filter @workspace/bloxs-mz run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/bloxs-mz", "run", "build" ]
+publicDir = "artifacts/bloxs-mz/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23113"
+BASE_PATH = "/"
