@@ -1350,6 +1350,7 @@ interface PendingDeposit {
   userId: string;
   userUid: string;
   deposit: Deposit;
+  depositFirebaseKey: string; // chave real no Firebase (pode diferir do deposit.id)
 }
 
 function AdminPanel({ onClose }: { onClose: () => void }) {
@@ -1387,30 +1388,22 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
             const nome = (raw.nome as string) ?? "Utilizador";
             const email = (raw.email as string) ?? uid;
             const id = (raw.id as string) ?? uid.slice(0, 9).toUpperCase();
-            const depositos = raw.depositos
-              ? Object.values(raw.depositos as Record<string, Deposit>)
-              : [];
-            depositsCount += depositos.length;
-            depositos.forEach((d: Deposit) => {
-              const matchFilter =
-                activeFilter === "pending" ? d.status === "pendente" : true;
-              if (matchFilter) {
-                list.push({ userEmail: email, userName: nome, userId: id, userUid: uid, deposit: d });
-              }
-            });
-          });
-          // Sincroniza localStorage com dados Firebase
-          const localUsers = loadUsers();
-          Object.entries(data).forEach(([uid, raw]) => {
-            const email = (raw.email as string) ?? uid;
-            if (email && localUsers[email]) {
-              localUsers[email].deposits = raw.depositos
-                ? Object.values(raw.depositos as Record<string, Deposit>)
-                : localUsers[email].deposits;
-              localUsers[email].balance = (raw.saldo as number) ?? localUsers[email].balance;
+            // Itera os depositos preservando a chave real do Firebase
+            const depositosRaw = raw.depositos as Record<string, Deposit> | null;
+            if (depositosRaw) {
+              Object.entries(depositosRaw).forEach(([fbKey, d]) => {
+                depositsCount++;
+                const matchFilter =
+                  activeFilter === "pending" ? d.status === "pendente" : true;
+                if (matchFilter) {
+                  list.push({
+                    userEmail: email, userName: nome, userId: id,
+                    userUid: uid, deposit: d, depositFirebaseKey: fbKey,
+                  });
+                }
+              });
             }
           });
-          saveUsers(localUsers);
         }
       } else {
         // Modo mock — lê apenas do localStorage
@@ -1422,7 +1415,10 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
             const matchFilter =
               activeFilter === "pending" ? d.status === "pendente" : true;
             if (matchFilter) {
-              list.push({ userEmail: u.email, userName: u.name, userId: u.id, userUid: "", deposit: d });
+              list.push({
+                userEmail: u.email, userName: u.name, userId: u.id,
+                userUid: "", deposit: d, depositFirebaseKey: d.id,
+              });
             }
           });
         });
@@ -1454,96 +1450,108 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   }
 
   async function approveDeposit(item: PendingDeposit) {
+    if (processingId) return; // evita duplo clique
+    setProcessingId(item.deposit.id);
+
+    const approvedAt = new Date().toISOString();
+    const amount = Number(item.deposit.amount || 0);
+    const txId = `dep_${item.deposit.id}_${Date.now()}`;
+    const newTx: Transaction = {
+      id: txId,
+      type: "credit",
+      amount,
+      description: `Depósito aprovado via ${item.deposit.method}`,
+      date: approvedAt,
+    };
+
     try {
-      setProcessingId(item.deposit.id);
-      const approvedAt = new Date().toISOString();
-      const newTx: Transaction = {
-        id: genId(),
-        type: "credit",
-        amount: Number(item.deposit.amount || 0),
-        description: `Depósito aprovado via ${item.deposit.method}`,
-        date: approvedAt,
-      };
-
       if (!isMockMode && item.userUid) {
-        // Lê o nó do utilizador no Firebase
-        const userSnap = await get(ref(rtdb, `usuarios/${item.userUid}`));
-        if (!userSnap.exists()) {
-          showToast("Utilizador não encontrado no Firebase.");
+        // 1. Verifica o status actual directamente pelo caminho exacto (usando a chave real do Firebase)
+        const depSnap = await get(ref(rtdb, `usuarios/${item.userUid}/depositos/${item.depositFirebaseKey}`));
+        if (!depSnap.exists()) {
+          showToast("⚠️ Depósito não encontrado no Firebase.");
           setProcessingId(null);
           return;
         }
-        const userData = userSnap.val();
-        const currentBalance = Number(userData.saldo ?? 0);
-        const depositos: Record<string, Deposit> = userData.depositos ?? {};
-        const transacoes: Record<string, Transaction> = userData.transacoes ?? {};
-
-        if (!depositos[item.deposit.id]) {
-          showToast("Depósito não encontrado no Firebase.");
-          setProcessingId(null);
-          return;
-        }
-        if (depositos[item.deposit.id].status === "confirmado") {
-          showToast("Este depósito já foi aprovado.");
+        const depData = depSnap.val() as Deposit;
+        if (depData.status === "confirmado") {
+          showToast("Este depósito já foi aprovado anteriormente.");
           setProcessingId(null);
           return;
         }
 
-        depositos[item.deposit.id] = { ...depositos[item.deposit.id], status: "confirmado", approvedAt };
-        transacoes[newTx.id] = newTx;
+        // 2. Escreve em paralelo: status do depósito + transacção (granular, sem ler o objeto inteiro)
+        await Promise.all([
+          update(ref(rtdb, `usuarios/${item.userUid}/depositos/${item.depositFirebaseKey}`), {
+            status: "confirmado",
+            approvedAt,
+          }),
+          set(ref(rtdb, `usuarios/${item.userUid}/transacoes/${txId}`), newTx),
+        ]);
 
-        await update(ref(rtdb, `usuarios/${item.userUid}`), {
-          saldo: currentBalance + Number(item.deposit.amount || 0),
-          depositos,
-          transacoes,
-          ultimoAcesso: approvedAt,
-        });
+        // 3. Actualiza o saldo atomicamente
+        await runTransaction(ref(rtdb, `usuarios/${item.userUid}/saldo`), (current) =>
+          Number(current || 0) + amount
+        );
       }
 
-      // Actualiza também o localStorage como cache local
+      // 4. Actualiza o localStorage como cache
       const users = loadUsers();
       const u = users[item.userEmail];
       if (u) {
-        const dep = (u.deposits ?? []).find(d => d.id === item.deposit.id);
-        if (dep && dep.status !== "confirmado") {
-          u.balance = Number(u.balance || 0) + Number(item.deposit.amount || 0);
-          u.deposits = (u.deposits ?? []).map(d =>
-            d.id === item.deposit.id ? { ...d, status: "confirmado" as const, approvedAt } : d
-          );
-          u.transactions = [newTx, ...(u.transactions ?? [])];
-          users[item.userEmail] = u;
-          saveUsers(users);
-        }
+        u.balance = Number(u.balance || 0) + amount;
+        u.deposits = (u.deposits ?? []).map(d =>
+          d.id === item.deposit.id ? { ...d, status: "confirmado" as const, approvedAt } : d
+        );
+        u.transactions = [newTx, ...(u.transactions ?? [])];
+        users[item.userEmail] = u;
+        saveUsers(users);
       }
 
-      setTimeout(() => {
-        setProcessingId(null);
-        loadPending();
-        showToast(`✅ ${item.deposit.amount.toLocaleString()} MT aprovados com sucesso!`);
-      }, 400);
+      // 5. Update optimista: remove da lista de pendentes / muda status na lista "todos"
+      setPendingList(prev =>
+        activeFilter === "pending"
+          ? prev.filter(p => p.deposit.id !== item.deposit.id)
+          : prev.map(p =>
+              p.deposit.id === item.deposit.id
+                ? { ...p, deposit: { ...p.deposit, status: "confirmado" as const, approvedAt } }
+                : p
+            )
+      );
 
+      showToast(`✅ ${amount.toLocaleString("pt-MZ")} MT aprovados e creditados!`);
     } catch (err) {
       console.error("Erro ao aprovar depósito:", err);
+      showToast("❌ Erro ao aprovar. Verifique a ligação e tente novamente.");
+    } finally {
       setProcessingId(null);
-      showToast("Erro ao aprovar depósito. Verifique a ligação.");
     }
   }
 
   async function rejectDeposit(item: PendingDeposit) {
+    if (processingId) return; // evita duplo clique
     setProcessingId(item.deposit.id);
+
     try {
       if (!isMockMode && item.userUid) {
-        const userSnap = await get(ref(rtdb, `usuarios/${item.userUid}`));
-        if (userSnap.exists()) {
-          const userData = userSnap.val();
-          const depositos: Record<string, Deposit> = userData.depositos ?? {};
-          if (depositos[item.deposit.id]) {
-            depositos[item.deposit.id] = { ...depositos[item.deposit.id], status: "rejeitado" as const };
-            await update(ref(rtdb, `usuarios/${item.userUid}`), { depositos });
+        // Verifica status actual antes de rejeitar
+        const depSnap = await get(ref(rtdb, `usuarios/${item.userUid}/depositos/${item.depositFirebaseKey}`));
+        if (depSnap.exists()) {
+          const depData = depSnap.val() as Deposit;
+          if (depData.status !== "pendente") {
+            showToast("Este depósito já foi processado.");
+            setProcessingId(null);
+            return;
           }
+          // Actualiza só o campo status (granular)
+          await update(ref(rtdb, `usuarios/${item.userUid}/depositos/${item.depositFirebaseKey}`), {
+            status: "rejeitado",
+            rejectedAt: new Date().toISOString(),
+          });
         }
       }
 
+      // Actualiza localStorage
       const users = loadUsers();
       const u = users[item.userEmail];
       if (u) {
@@ -1553,11 +1561,24 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
         users[item.userEmail] = u;
         saveUsers(users);
       }
-      setTimeout(() => { setProcessingId(null); loadPending(); showToast("❌ Depósito rejeitado e arquivado."); }, 400);
+
+      // Update optimista da lista
+      setPendingList(prev =>
+        activeFilter === "pending"
+          ? prev.filter(p => p.deposit.id !== item.deposit.id)
+          : prev.map(p =>
+              p.deposit.id === item.deposit.id
+                ? { ...p, deposit: { ...p.deposit, status: "rejeitado" as const } }
+                : p
+            )
+      );
+
+      showToast("❌ Depósito rejeitado e arquivado.");
     } catch (err) {
       console.error("Erro ao rejeitar depósito:", err);
+      showToast("❌ Erro ao rejeitar. Verifique a ligação e tente novamente.");
+    } finally {
       setProcessingId(null);
-      showToast("Erro ao rejeitar depósito.");
     }
   }
 
