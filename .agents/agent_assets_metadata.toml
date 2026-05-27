@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "U6e0SbmEYYLG6B7jlUC29"
+uri = "file://bloxs-mz-final.zip"
+type = "unspecified"
+title = "bloxs-mz-final.zip — Código fonte completo"
