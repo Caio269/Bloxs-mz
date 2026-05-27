@@ -1110,9 +1110,8 @@ function EquipaTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => void
     }
   }
 
-  // import.meta.env.BASE_URL inclui o base path do Vite (ex: "/bloxs-mz/")
-  // para que o link funcione correctamente no ambiente Replit e em produção.
-  const link = `${window.location.origin}${import.meta.env.BASE_URL}ref/${user.id}`;
+  // O hash (#ref=ID) sobrevive a redirects do Replit e nunca é enviado ao servidor.
+  const link = `${window.location.origin}${import.meta.env.BASE_URL}#ref=${user.id}`;
 
   return (
     <div className="scrollable fade-in" style={{ flex: 1, padding: "16px" }}>

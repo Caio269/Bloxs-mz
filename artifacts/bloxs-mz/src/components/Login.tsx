@@ -82,16 +82,22 @@ export default function Login({ onSuccess, isMockMode = false, onMockLogin }: Pr
     if (!email.trim()) { setError("Por favor insira o seu email."); return; }
     if (password.length < 6) { setError("A palavra-passe deve ter pelo menos 6 caracteres."); return; }
 
+    // Lê o padrinhoID ANTES de qualquer operação assíncrona,
+    // para que nenhuma race condition o possa apagar do localStorage.
+    const padrinhoID = localStorage.getItem("padrinhoID")?.toUpperCase().trim() || null;
+
     setLoading(true);
     try {
       const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
       const firebaseUser = credential.user;
+      const newUserId = firebaseUser.uid.slice(0, 9).toUpperCase();
 
       await updateProfile(firebaseUser, { displayName: name.trim() });
 
+      const now = new Date().toISOString();
       await set(ref(rtdb, `usuarios/${firebaseUser.uid}`), {
         uid: firebaseUser.uid,
-        id: firebaseUser.uid.slice(0, 9).toUpperCase(),
+        id: newUserId,
         nome: name.trim(),
         email: email.trim().toLowerCase(),
         saldo: 0,
@@ -102,79 +108,28 @@ export default function Login({ onSuccess, isMockMode = false, onMockLogin }: Pr
           cox:   { ativo: false, ultimaColeta: null },
           sc:    { ativo: false, ultimaColeta: null },
         },
-        transacoes: [],
-        levantamentos: [],
-        depositos: [],
-        equipa: [],
-        criadoEm: new Date().toISOString(),
-        ultimoAcesso: new Date().toISOString(),
+        transacoes: {},
+        levantamentos: {},
+        depositos: {},
+        equipa: {},
+        ...(padrinhoID ? { padrinhoId: padrinhoID } : {}),
+        criadoEm: now,
+        ultimoAcesso: now,
       });
 
       // ── Bónus de referência ──────────────────────────────────────────────────
-      // Credita +50 MT ao padrinho assim que o indicado cria conta,
-      // independentemente do plano activo do padrinho.
-      const padrinhoID = localStorage.getItem("padrinhoID");
-      if (padrinhoID && padrinhoID !== firebaseUser.uid.slice(0, 9).toUpperCase()) {
-        try {
-          const q = rtdbQuery(ref(rtdb, "usuarios"), orderByChild("id"), equalTo(padrinhoID));
-          const padrinhoSnap = await get(q);
-
-          if (padrinhoSnap.exists()) {
-            const padrinhoUid = Object.keys(padrinhoSnap.val())[0];
-            const padrinhoData: any = Object.values(padrinhoSnap.val())[0];
-
-            // Previne duplicados: verifica se este indicado já está na equipa
-            const equipaExistente: Record<string, any> = padrinhoData?.equipa ?? {};
-            const jaIndicado = Object.values(equipaExistente).some(
-              (m: any) => m.uid === firebaseUser.uid
-            );
-
-            if (!jaIndicado) {
-              const txId = `ref_${firebaseUser.uid.slice(0, 8)}_${Date.now()}`;
-              const membroId = `mem_${firebaseUser.uid.slice(0, 8)}`;
-
-              // 1. Actualiza o saldo atomicamente
-              await runTransaction(ref(rtdb, `usuarios/${padrinhoUid}/saldo`), (saldoAtual) => {
-                return Number(saldoAtual || 0) + 50;
-              });
-
-              // 2. Adiciona o novo membro à equipa com chave estável (uid do indicado)
-              await set(ref(rtdb, `usuarios/${padrinhoUid}/equipa/${membroId}`), {
-                uid: firebaseUser.uid,
-                name: name.trim(),
-                joinDate: new Date().toISOString(),
-                plan: "Novo membro",
-              });
-
-              // 3. Regista a transacção com chave estável
-              await set(ref(rtdb, `usuarios/${padrinhoUid}/transacoes/${txId}`), {
-                id: txId,
-                type: "credit",
-                amount: 50,
-                description: `Bónus de referência — ${name.trim()}`,
-                date: new Date().toISOString(),
-              });
-
-              // 4. Marca no perfil do novo utilizador quem o indicou
-              await update(ref(rtdb, `usuarios/${firebaseUser.uid}`), {
-                padrinhoId: padrinhoID,
-                padrinhoUid,
-              });
-            }
-
-            localStorage.removeItem("padrinhoID");
-          } else {
-            // ID de padrinho inválido — limpa o localStorage
-            localStorage.removeItem("padrinhoID");
-          }
-        } catch (refErr) {
-          console.error("Erro ao creditar bónus de referência:", refErr);
-          // Falha silenciosa — o registo do utilizador já foi bem-sucedido
-          localStorage.removeItem("padrinhoID");
-        }
+      // Credita +50 MT ao padrinho imediatamente após o cadastro do indicado,
+      // sem exigir depósito ou plano activo.
+      if (padrinhoID && padrinhoID !== newUserId) {
+        await creditarBonusPadrinho({
+          padrinhoID,
+          indicadoUid: firebaseUser.uid,
+          indicadoNome: name.trim(),
+        });
       }
       // ────────────────────────────────────────────────────────────────────────
 
+      localStorage.removeItem("padrinhoID");
       setSuccessMsg("Conta criada com sucesso! Bem-vindo ao Bloxs mz 🎉");
       onSuccess?.();
     } catch (err) {
@@ -182,6 +137,111 @@ export default function Login({ onSuccess, isMockMode = false, onMockLogin }: Pr
       setError(mapFirebaseError(e.code));
     } finally {
       setLoading(false);
+    }
+  }
+
+  /**
+   * Encontra o padrinho pelo ID curto e credita os 50 MT.
+   * Usa duas estratégias para encontrar o padrinho:
+   *   1. Query indexada (orderByChild "id") — rápida
+   *   2. Scan completo de todos os utilizadores — fallback robusto
+   */
+  async function creditarBonusPadrinho({
+    padrinhoID,
+    indicadoUid,
+    indicadoNome,
+  }: {
+    padrinhoID: string;
+    indicadoUid: string;
+    indicadoNome: string;
+  }) {
+    try {
+      // ── Estratégia 1: query indexada ──────────────────────────────────────
+      let padrinhoUid: string | null = null;
+      let padrinhoData: Record<string, any> | null = null;
+
+      const q = rtdbQuery(ref(rtdb, "usuarios"), orderByChild("id"), equalTo(padrinhoID));
+      const snap = await get(q);
+
+      if (snap.exists()) {
+        padrinhoUid = Object.keys(snap.val())[0];
+        padrinhoData = Object.values(snap.val())[0] as Record<string, any>;
+      } else {
+        // ── Estratégia 2: scan completo (fallback) ────────────────────────
+        // Necessário se a query falhou por falta de índice ou dado inconsistente
+        const allSnap = await get(ref(rtdb, "usuarios"));
+        if (allSnap.exists()) {
+          const allUsers = allSnap.val() as Record<string, Record<string, any>>;
+          for (const [uid, data] of Object.entries(allUsers)) {
+            const idField = (data.id as string | undefined)?.toUpperCase();
+            if (idField === padrinhoID) {
+              padrinhoUid = uid;
+              padrinhoData = data;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!padrinhoUid || !padrinhoData) {
+        console.warn(`[Referência] Padrinho com ID "${padrinhoID}" não encontrado.`);
+        return;
+      }
+
+      // Auto-referência: padrinho não pode ser o próprio indicado
+      if (padrinhoUid === indicadoUid) {
+        console.warn("[Referência] Auto-referência detectada — bónus não creditado.");
+        return;
+      }
+
+      // Previne duplicado: verifica se o indicado já está na equipa do padrinho
+      const equipaExistente: Record<string, any> = padrinhoData.equipa ?? {};
+      const jaIndicado = Object.values(equipaExistente).some(
+        (m: any) => m.uid === indicadoUid
+      );
+      if (jaIndicado) {
+        console.warn("[Referência] Indicado já registado na equipa — bónus não creditado.");
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const txId    = `ref_${indicadoUid.slice(0, 8)}`;
+      const membroId = `mem_${indicadoUid.slice(0, 8)}`;
+
+      // 1. Saldo atómico via runTransaction (garante consistência mesmo com escrita concorrente)
+      const txResult = await runTransaction(ref(rtdb, `usuarios/${padrinhoUid}/saldo`), (saldoAtual) =>
+        Number(saldoAtual || 0) + 50
+      );
+      if (!txResult.committed) {
+        console.error("[Referência] runTransaction não foi committed — saldo não alterado.");
+        return;
+      }
+
+      // 2. Equipa + transacção em paralelo (usando set com chave estável para ser idempotente)
+      await Promise.all([
+        set(ref(rtdb, `usuarios/${padrinhoUid}/equipa/${membroId}`), {
+          uid: indicadoUid,
+          name: indicadoNome,
+          joinDate: now,
+          plan: "Novo membro",
+        }),
+        set(ref(rtdb, `usuarios/${padrinhoUid}/transacoes/${txId}`), {
+          id: txId,
+          type: "credit",
+          amount: 50,
+          description: `Bónus de referência — ${indicadoNome}`,
+          date: now,
+        }),
+        update(ref(rtdb, `usuarios/${indicadoUid}`), {
+          padrinhoId: padrinhoID,
+          padrinhoUid,
+        }),
+      ]);
+
+      console.log(`[Referência] ✅ 50 MT creditados ao padrinho ${padrinhoUid} (ID: ${padrinhoID})`);
+    } catch (err) {
+      // Falha no bónus não impede o utilizador de usar a conta
+      console.error("[Referência] Erro ao creditar bónus:", err);
     }
   }
 
