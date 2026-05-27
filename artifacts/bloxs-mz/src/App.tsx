@@ -80,7 +80,7 @@ interface Withdrawal {
   net: number;
   method: "M-Pesa" | "e-Mola";
   phone: string;
-  status: "pendente" | "processado";
+  status: "pendente" | "processado" | "rejeitado";
   date: string;
 }
 
@@ -702,30 +702,85 @@ function FinancasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
     showToast("✅ Depósito enviado! A redirigir para WhatsApp…");
   }
 
-  function handleWithdraw(e: React.FormEvent) {
+  async function handleWithdraw(e: React.FormEvent) {
     e.preventDefault();
     const amt = parseFloat(wAmount);
     if (isNaN(amt) || amt <= 0) { showToast("Insira um valor válido."); return; }
     if (amt > user.balance) { showToast("Saldo insuficiente."); return; }
     if (amt < 50) { showToast("Levantamento mínimo: 50 MT."); return; }
+    if (!wPhone.trim()) { showToast("Insira o número de telemóvel."); return; }
+
     const fee = amt * 0.10;
     const net = amt - fee;
+    const now = new Date().toISOString();
+    const withdrawal: Withdrawal = {
+      id: genId(), amount: amt, fee, net,
+      method: wMethod, phone: wPhone.trim(),
+      status: "pendente", date: now,
+    };
+    const txId = genId();
+
     const users = loadUsers();
     const updated = { ...user };
     updated.balance -= amt;
-    updated.withdrawals = [
-      { id: genId(), amount: amt, fee, net, method: wMethod, phone: wPhone, status: "pendente", date: new Date().toISOString() },
-      ...updated.withdrawals,
-    ];
+    updated.withdrawals = [withdrawal, ...updated.withdrawals];
     updated.transactions = [
-      { id: genId(), type: "debit", amount: amt, description: `Levantamento via ${wMethod}`, date: new Date().toISOString() },
+      { id: txId, type: "debit", amount: amt, description: `Levantamento via ${wMethod}`, date: now },
       ...updated.transactions,
     ];
     users[user.email] = updated;
     saveUsers(users);
     onUpdate(updated);
+
+    // ── Persiste no Firebase RTDB ─────────────────────────────────────────────
+    if (!isMockMode) {
+      try {
+        const snap = await get(ref(rtdb, "usuarios"));
+        if (snap.exists()) {
+          const data = snap.val() as Record<string, Record<string, unknown>>;
+          const uid = Object.keys(data).find(k => (data[k].email as string) === user.email);
+          if (uid) {
+            await Promise.all([
+              set(ref(rtdb, `usuarios/${uid}/levantamentos/${withdrawal.id}`), withdrawal),
+              set(ref(rtdb, `usuarios/${uid}/transacoes/${txId}`), {
+                id: txId, type: "debit", amount: amt,
+                description: `Levantamento via ${wMethod}`, date: now,
+              }),
+              runTransaction(ref(rtdb, `usuarios/${uid}/saldo`), (cur) =>
+                Math.max(0, Number(cur || 0) - amt)
+              ),
+            ]);
+          }
+        }
+      } catch (err) {
+        console.error("Erro ao guardar levantamento no Firebase:", err);
+      }
+    }
+
+    // ── Notificação WhatsApp para o administrador ─────────────────────────────
+    const dataHora = new Date().toLocaleString("pt-MZ", {
+      day: "2-digit", month: "2-digit", year: "numeric",
+      hour: "2-digit", minute: "2-digit",
+    });
+    const msg = [
+      `💰 *NOVO LEVANTAMENTO — Bloxs mz*`,
+      ``,
+      `👤 *Utilizador:* ${user.name}`,
+      `📧 *Email:* ${user.email}`,
+      `🆔 *ID Conta:* ${user.id}`,
+      ``,
+      `💳 *Método:* ${wMethod}`,
+      `💵 *Valor:* ${amt.toLocaleString("pt-MZ")} MT`,
+      `🔑 *Número de Telefone:* ${wPhone.trim()}`,
+      ``,
+      `📅 *Data/Hora:* ${dataHora}`,
+      ``,
+      `_Por favor confirme e actualize o saldo._`,
+    ].join("\n");
+    window.open(`https://wa.me/258859219017?text=${encodeURIComponent(msg)}`, "_blank");
+
     setWAmount("");
-    showToast(`Pedido enviado! Receberá ${net.toFixed(2)} MT via ${wMethod}.`);
+    showToast(`✅ Pedido enviado! Receberá ${net.toFixed(2)} MT via ${wMethod}.`);
   }
 
   const SECTIONS = [
@@ -1351,7 +1406,16 @@ interface PendingDeposit {
   userId: string;
   userUid: string;
   deposit: Deposit;
-  depositFirebaseKey: string; // chave real no Firebase (pode diferir do deposit.id)
+  depositFirebaseKey: string;
+}
+
+interface PendingWithdrawal {
+  userEmail: string;
+  userName: string;
+  userId: string;
+  userUid: string;
+  withdrawal: Withdrawal;
+  withdrawalFirebaseKey: string;
 }
 
 function AdminPanel({ onClose }: { onClose: () => void }) {
@@ -1360,11 +1424,15 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   const [pwdError, setPwdError] = useState("");
   const [showPwd, setShowPwd] = useState(false);
   const [toast, setToast] = useState("");
+  const [adminTab, setAdminTab] = useState<"depositos" | "levantamentos">("depositos");
   const [pendingList, setPendingList] = useState<PendingDeposit[]>([]);
+  const [withdrawalList, setWithdrawalList] = useState<PendingWithdrawal[]>([]);
   const [allUsersCount, setAllUsersCount] = useState(0);
   const [totalDepositsCount, setTotalDepositsCount] = useState(0);
   const [activeFilter, setActiveFilter] = useState<"pending" | "all">("pending");
+  const [withdrawalFilter, setWithdrawalFilter] = useState<"pending" | "all">("pending");
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const [processingWithdrawalId, setProcessingWithdrawalId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   function showToast(msg: string) {
@@ -1437,7 +1505,42 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
     }
   }
 
+  async function loadWithdrawals() {
+    setLoading(true);
+    try {
+      const wlist: PendingWithdrawal[] = [];
+      if (!isMockMode) {
+        const snap = await get(ref(rtdb, "usuarios"));
+        if (snap.exists()) {
+          const data = snap.val() as Record<string, Record<string, unknown>>;
+          Object.entries(data).forEach(([uid, raw]) => {
+            const nome  = (raw.nome as string)  ?? "Utilizador";
+            const email = (raw.email as string) ?? uid;
+            const id    = (raw.id as string)    ?? uid.slice(0, 9).toUpperCase();
+            const lvRaw = raw.levantamentos as Record<string, Withdrawal> | null;
+            if (lvRaw) {
+              Object.entries(lvRaw).forEach(([fbKey, w]) => {
+                const match = withdrawalFilter === "pending" ? w.status === "pendente" : true;
+                if (match) {
+                  wlist.push({ userEmail: email, userName: nome, userId: id, userUid: uid, withdrawal: w, withdrawalFirebaseKey: fbKey });
+                }
+              });
+            }
+          });
+        }
+      }
+      wlist.sort((a, b) => new Date(b.withdrawal.date).getTime() - new Date(a.withdrawal.date).getTime());
+      setWithdrawalList(wlist);
+    } catch (err) {
+      console.error("Erro ao carregar levantamentos:", err);
+      showToast("Erro ao carregar levantamentos.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => { if (authed) loadPending(); }, [authed, activeFilter]);
+  useEffect(() => { if (authed) loadWithdrawals(); }, [authed, withdrawalFilter]);
 
   function handleLogin(e: FormEvent) {
     e.preventDefault();
@@ -1583,13 +1686,82 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
     }
   }
 
+  async function approveWithdrawal(item: PendingWithdrawal) {
+    if (processingWithdrawalId) return;
+    setProcessingWithdrawalId(item.withdrawal.id);
+    try {
+      if (!isMockMode && item.userUid) {
+        const snap = await get(ref(rtdb, `usuarios/${item.userUid}/levantamentos/${item.withdrawalFirebaseKey}`));
+        if (!snap.exists()) { showToast("⚠️ Levantamento não encontrado."); return; }
+        const w = snap.val() as Withdrawal;
+        if (w.status !== "pendente") { showToast("Este levantamento já foi processado."); return; }
+        await update(ref(rtdb, `usuarios/${item.userUid}/levantamentos/${item.withdrawalFirebaseKey}`), {
+          status: "processado", processedAt: new Date().toISOString(),
+        });
+      }
+      setWithdrawalList(prev =>
+        withdrawalFilter === "pending"
+          ? prev.filter(p => p.withdrawal.id !== item.withdrawal.id)
+          : prev.map(p => p.withdrawal.id === item.withdrawal.id
+              ? { ...p, withdrawal: { ...p.withdrawal, status: "processado" as const } } : p)
+      );
+      showToast(`✅ Levantamento de ${item.withdrawal.net.toFixed(2)} MT marcado como processado!`);
+    } catch (err) {
+      console.error("Erro ao aprovar levantamento:", err);
+      showToast("❌ Erro ao processar. Tente novamente.");
+    } finally {
+      setProcessingWithdrawalId(null);
+    }
+  }
+
+  async function rejectWithdrawal(item: PendingWithdrawal) {
+    if (processingWithdrawalId) return;
+    setProcessingWithdrawalId(item.withdrawal.id);
+    try {
+      if (!isMockMode && item.userUid) {
+        const snap = await get(ref(rtdb, `usuarios/${item.userUid}/levantamentos/${item.withdrawalFirebaseKey}`));
+        if (!snap.exists()) { showToast("⚠️ Levantamento não encontrado."); return; }
+        const w = snap.val() as Withdrawal;
+        if (w.status !== "pendente") { showToast("Este levantamento já foi processado."); return; }
+        // Rejeita e devolve o valor ao saldo do utilizador
+        await Promise.all([
+          update(ref(rtdb, `usuarios/${item.userUid}/levantamentos/${item.withdrawalFirebaseKey}`), {
+            status: "rejeitado", rejectedAt: new Date().toISOString(),
+          }),
+          runTransaction(ref(rtdb, `usuarios/${item.userUid}/saldo`), (cur) =>
+            Number(cur || 0) + item.withdrawal.amount
+          ),
+        ]);
+      }
+      setWithdrawalList(prev =>
+        withdrawalFilter === "pending"
+          ? prev.filter(p => p.withdrawal.id !== item.withdrawal.id)
+          : prev.map(p => p.withdrawal.id === item.withdrawal.id
+              ? { ...p, withdrawal: { ...p.withdrawal, status: "rejeitado" as const } } : p)
+      );
+      showToast(`↩️ Levantamento rejeitado. ${item.withdrawal.amount.toLocaleString("pt-MZ")} MT devolvidos ao utilizador.`);
+    } catch (err) {
+      console.error("Erro ao rejeitar levantamento:", err);
+      showToast("❌ Erro ao rejeitar. Tente novamente.");
+    } finally {
+      setProcessingWithdrawalId(null);
+    }
+  }
+
   const totalPending = pendingList.filter(p => p.deposit.status === "pendente").length;
   const totalAmount  = pendingList.filter(p => p.deposit.status === "pendente").reduce((s, p) => s + p.deposit.amount, 0);
+  const totalWithdrawalsPending = withdrawalList.filter(w => w.withdrawal.status === "pendente").length;
 
   function statusBadge(status: Deposit["status"]) {
     if (status === "pendente")   return { bg: "rgba(250,204,21,0.15)",  color: "#facc15", border: "rgba(250,204,21,0.3)",  label: "⏳ Pendente" };
     if (status === "rejeitado")  return { bg: "rgba(239,68,68,0.12)",   color: "#f87171", border: "rgba(239,68,68,0.3)",   label: "❌ Rejeitado" };
     return                              { bg: "rgba(163,230,53,0.12)",  color: "#a3e635", border: "rgba(163,230,53,0.25)", label: "✅ Confirmado" };
+  }
+
+  function wBadge(status: Withdrawal["status"]) {
+    if (status === "pendente")   return { bg: "rgba(250,204,21,0.15)", color: "#facc15", border: "rgba(250,204,21,0.3)",  label: "⏳ Pendente" };
+    if (status === "rejeitado")  return { bg: "rgba(239,68,68,0.12)",  color: "#f87171", border: "rgba(239,68,68,0.3)",   label: "❌ Rejeitado" };
+    return                              { bg: "rgba(163,230,53,0.12)", color: "#a3e635", border: "rgba(163,230,53,0.25)", label: "✅ Processado" };
   }
 
   // ── Password gate ──
@@ -1654,7 +1826,7 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
           ← Sair
         </button>
         <span style={{ fontWeight: 800, fontSize: 15 }}>🔐 Admin</span>
-        <button onClick={loadPending} style={{ background: "rgba(163,230,53,0.1)", border: "1px solid rgba(163,230,53,0.2)", borderRadius: 10, padding: "7px 12px", cursor: "pointer", color: "#a3e635", fontSize: 12, fontWeight: 600 }}>
+        <button onClick={() => { loadPending(); loadWithdrawals(); }} style={{ background: "rgba(163,230,53,0.1)", border: "1px solid rgba(163,230,53,0.2)", borderRadius: 10, padding: "7px 12px", cursor: "pointer", color: "#a3e635", fontSize: 12, fontWeight: 600 }}>
           ↻ Refresh
         </button>
       </div>
@@ -1662,173 +1834,229 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
       <div className="scrollable" style={{ flex: 1 }}>
         {/* Summary cards */}
         <div style={{ display: "flex", gap: 10, margin: "16px 16px 0" }}>
-          <div className="glass-card" style={{ flex: 1, padding: "14px 16px", textAlign: "center" }}>
-            <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 4 }}>PENDENTES</p>
-            <p style={{ fontSize: 28, fontWeight: 900, color: "#facc15", lineHeight: 1 }}>{totalPending}</p>
+          <div className="glass-card" style={{ flex: 1, padding: "12px 14px", textAlign: "center" }}>
+            <p style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", marginBottom: 3 }}>DEP. PENDENTES</p>
+            <p style={{ fontSize: 24, fontWeight: 900, color: "#facc15", lineHeight: 1 }}>{totalPending}</p>
           </div>
-          <div className="glass-card" style={{ flex: 2, padding: "14px 16px" }}>
-            <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 4 }}>VALOR TOTAL PENDENTE</p>
-            <p style={{ fontSize: 22, fontWeight: 900, color: "#a3e635", lineHeight: 1 }}>
-              {totalAmount.toLocaleString("pt-MZ")} <span style={{ fontSize: 13, color: "rgba(255,255,255,0.4)" }}>MT</span>
-            </p>
+          <div className="glass-card" style={{ flex: 1, padding: "12px 14px", textAlign: "center" }}>
+            <p style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", marginBottom: 3 }}>LEV. PENDENTES</p>
+            <p style={{ fontSize: 24, fontWeight: 900, color: "#fb923c", lineHeight: 1 }}>{totalWithdrawalsPending}</p>
+          </div>
+          <div className="glass-card" style={{ flex: 1, padding: "12px 14px", textAlign: "center" }}>
+            <p style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", marginBottom: 3 }}>UTILIZADORES</p>
+            <p style={{ fontSize: 24, fontWeight: 900, color: "#a3e635", lineHeight: 1 }}>{loading ? "…" : allUsersCount}</p>
           </div>
         </div>
 
-        {/* Stats row */}
-        <div style={{ display: "flex", gap: 10, margin: "10px 16px 0" }}>
-          {[
-            { label: "Total utilizadores", value: allUsersCount },
-            { label: "Total depósitos", value: totalDepositsCount },
-          ].map((s, i) => (
-            <div key={i} className="glass-card" style={{ flex: 1, padding: "12px 14px" }}>
-              <p style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginBottom: 3 }}>{s.label.toUpperCase()}</p>
-              <p style={{ fontSize: 20, fontWeight: 800 }}>{loading ? "…" : s.value}</p>
-            </div>
-          ))}
-        </div>
-
-        {/* Filter toggle */}
-        <div style={{ display: "flex", margin: "14px 16px 0", background: "rgba(255,255,255,0.04)", borderRadius: 12, padding: 4 }}>
-          {([["pending", "⏳ Pendentes"], ["all", "📋 Todos"]] as const).map(([id, label]) => (
-            <button key={id} onClick={() => setActiveFilter(id)}
+        {/* Main tab switcher: Depósitos / Levantamentos */}
+        <div style={{ display: "flex", margin: "12px 16px 0", background: "rgba(255,255,255,0.04)", borderRadius: 14, padding: 4, gap: 4 }}>
+          {([
+            ["depositos",    "💰 Depósitos",     totalPending],
+            ["levantamentos","💸 Levantamentos",  totalWithdrawalsPending],
+          ] as const).map(([id, label, count]) => (
+            <button key={id} onClick={() => setAdminTab(id)}
               style={{
-                flex: 1, padding: "9px", borderRadius: 10, border: "none", cursor: "pointer",
-                fontWeight: 700, fontSize: 13, transition: "all 0.2s",
-                background: activeFilter === id ? "#a3e635" : "transparent",
-                color: activeFilter === id ? "#0b0f19" : "rgba(255,255,255,0.4)",
+                flex: 1, padding: "10px 4px", borderRadius: 11, border: "none", cursor: "pointer",
+                fontWeight: 700, fontSize: 13, transition: "all 0.2s", position: "relative",
+                background: adminTab === id ? "linear-gradient(135deg, #a3e635, #84cc16)" : "transparent",
+                color: adminTab === id ? "#0b0f19" : "rgba(255,255,255,0.45)",
               }}>
               {label}
+              {count > 0 && (
+                <span style={{
+                  position: "absolute", top: 4, right: 8,
+                  background: adminTab === id ? "#0b0f19" : "#facc15",
+                  color: adminTab === id ? "#a3e635" : "#0b0f19",
+                  borderRadius: 20, fontSize: 9, fontWeight: 900, padding: "1px 5px", lineHeight: 1.4,
+                }}>{count}</span>
+              )}
             </button>
           ))}
         </div>
 
-        {/* Deposit list */}
-        <div style={{ padding: "14px 16px" }}>
-          {pendingList.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "48px 0", color: "rgba(255,255,255,0.3)" }}>
-              <p style={{ fontSize: 40, marginBottom: 12 }}>✅</p>
-              <p style={{ fontSize: 15, fontWeight: 600 }}>
-                {activeFilter === "pending" ? "Nenhum depósito pendente!" : "Sem depósitos registados."}
-              </p>
-              <p style={{ fontSize: 12, marginTop: 6, color: "rgba(255,255,255,0.2)" }}>
-                {activeFilter === "pending" ? "Tudo em dia." : "Os utilizadores ainda não fizeram depósitos."}
-              </p>
+        {/* ── TAB: DEPÓSITOS ── */}
+        {adminTab === "depositos" && (
+          <>
+            {/* Filter toggle */}
+            <div style={{ display: "flex", margin: "10px 16px 0", background: "rgba(255,255,255,0.04)", borderRadius: 12, padding: 4 }}>
+              {([["pending", "⏳ Pendentes"], ["all", "📋 Todos"]] as const).map(([id, label]) => (
+                <button key={id} onClick={() => setActiveFilter(id)}
+                  style={{
+                    flex: 1, padding: "8px", borderRadius: 10, border: "none", cursor: "pointer",
+                    fontWeight: 700, fontSize: 12, transition: "all 0.2s",
+                    background: activeFilter === id ? "#facc15" : "transparent",
+                    color: activeFilter === id ? "#0b0f19" : "rgba(255,255,255,0.4)",
+                  }}>
+                  {label}
+                </button>
+              ))}
             </div>
-          ) : (
-            pendingList.map(item => {
-              const isPending = item.deposit.status === "pendente";
-              const isProcessing = processingId === item.deposit.id;
-              const badge = statusBadge(item.deposit.status);
-              const borderColor = isPending ? "rgba(250,204,21,0.25)" : item.deposit.status === "rejeitado" ? "rgba(239,68,68,0.2)" : "rgba(163,230,53,0.15)";
-              return (
-                <div key={item.deposit.id} className="glass-card" style={{
-                  padding: "16px", marginBottom: 12,
-                  border: `1px solid ${borderColor}`,
-                  opacity: isProcessing ? 0.6 : 1, transition: "opacity 0.3s",
-                }}>
-                  {/* Status badge + date */}
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                    <span style={{
-                      fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20,
-                      background: badge.bg, color: badge.color,
-                      border: `1px solid ${badge.border}`,
-                    }}>
-                      {badge.label}
-                    </span>
-                    <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>
-                      {new Date(item.deposit.date).toLocaleDateString("pt-MZ", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
-                    </span>
-                  </div>
 
-                  {/* User info */}
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-                    <div style={{
-                      width: 36, height: 36, borderRadius: 10, flexShrink: 0,
-                      background: "linear-gradient(135deg, #a3e635, #84cc16)",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      fontWeight: 800, color: "#0b0f19", fontSize: 14,
-                    }}>
-                      {item.userName[0]?.toUpperCase() ?? "?"}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 1 }}>{item.userName}</p>
-                      <p style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {item.userEmail}
-                      </p>
-                    </div>
-                    <span className="badge" style={{ flexShrink: 0 }}>{item.userId}</span>
-                  </div>
-
-                  {/* Deposit details */}
-                  <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "12px 14px", marginBottom: 14 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                      <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Método</span>
-                      <span style={{
-                        fontSize: 12, fontWeight: 700,
-                        color: item.deposit.method === "M-Pesa" ? "#a3e635" : "#facc15",
-                      }}>{item.deposit.method}</span>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                      <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Valor</span>
-                      <span style={{ fontSize: 15, fontWeight: 800, color: "#a3e635" }}>
-                        {item.deposit.amount.toLocaleString("pt-MZ")} MT
-                      </span>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>ID Transação</span>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: "rgba(255,255,255,0.75)", letterSpacing: "0.4px" }}>
-                        {item.deposit.txId}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Action buttons — only for pending */}
-                  {isPending && (
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <button
-                        onClick={() => approveDeposit(item)}
-                        disabled={isProcessing}
-                        style={{
-                          flex: 2, padding: "12px", borderRadius: 12, border: "none",
-                          background: isProcessing ? "rgba(163,230,53,0.3)" : "linear-gradient(135deg, #a3e635, #84cc16)",
-                          color: "#0b0f19", fontWeight: 800, fontSize: 13, cursor: isProcessing ? "not-allowed" : "pointer",
-                          transition: "all 0.2s",
-                        }}
-                      >
-                        {isProcessing ? "A processar…" : "✅ Aprovar Depósito"}
-                      </button>
-                      <button
-                        onClick={() => rejectDeposit(item)}
-                        disabled={isProcessing}
-                        style={{
-                          flex: 1, padding: "12px", borderRadius: 12,
-                          border: "1px solid rgba(239,68,68,0.3)",
-                          background: "rgba(239,68,68,0.08)",
-                          color: "#f87171", fontWeight: 700, fontSize: 13,
-                          cursor: isProcessing ? "not-allowed" : "pointer",
-                          transition: "all 0.2s",
-                        }}
-                      >
-                        ❌ Rejeitar
-                      </button>
-                    </div>
-                  )}
-
-                  {!isPending && (
-                    <div style={{
-                      textAlign: "center", padding: "6px", borderRadius: 10,
-                      background: item.deposit.status === "rejeitado" ? "rgba(239,68,68,0.06)" : "rgba(163,230,53,0.05)",
-                    }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: item.deposit.status === "rejeitado" ? "#f87171" : "#a3e635" }}>
-                        {item.deposit.status === "rejeitado" ? "❌ Rejeitado e arquivado" : "✅ Aprovado — saldo actualizado"}
-                      </span>
-                    </div>
-                  )}
+            {/* Deposit list */}
+            <div style={{ padding: "14px 16px" }}>
+              {loading ? (
+                <div style={{ textAlign: "center", padding: "40px 0", color: "rgba(255,255,255,0.3)" }}>A carregar…</div>
+              ) : pendingList.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "48px 0", color: "rgba(255,255,255,0.3)" }}>
+                  <p style={{ fontSize: 40, marginBottom: 12 }}>✅</p>
+                  <p style={{ fontSize: 15, fontWeight: 600 }}>
+                    {activeFilter === "pending" ? "Nenhum depósito pendente!" : "Sem depósitos registados."}
+                  </p>
                 </div>
-              );
-            })
-          )}
-        </div>
+              ) : (
+                pendingList.map(item => {
+                  const isPending = item.deposit.status === "pendente";
+                  const isProcessing = processingId === item.deposit.id;
+                  const badge = statusBadge(item.deposit.status);
+                  const borderColor = isPending ? "rgba(250,204,21,0.25)" : item.deposit.status === "rejeitado" ? "rgba(239,68,68,0.2)" : "rgba(163,230,53,0.15)";
+                  return (
+                    <div key={item.deposit.id} className="glass-card" style={{ padding: "16px", marginBottom: 12, border: `1px solid ${borderColor}`, opacity: isProcessing ? 0.6 : 1, transition: "opacity 0.3s" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: badge.bg, color: badge.color, border: `1px solid ${badge.border}` }}>
+                          {badge.label}
+                        </span>
+                        <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>
+                          {new Date(item.deposit.date).toLocaleDateString("pt-MZ", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                        <div style={{ width: 36, height: 36, borderRadius: 10, flexShrink: 0, background: "linear-gradient(135deg, #a3e635, #84cc16)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, color: "#0b0f19", fontSize: 14 }}>
+                          {item.userName[0]?.toUpperCase() ?? "?"}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 1 }}>{item.userName}</p>
+                          <p style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.userEmail}</p>
+                        </div>
+                        <span className="badge" style={{ flexShrink: 0 }}>{item.userId}</span>
+                      </div>
+                      <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "12px 14px", marginBottom: 14 }}>
+                        {[
+                          ["Método", item.deposit.method, item.deposit.method === "M-Pesa" ? "#a3e635" : "#facc15"],
+                          ["Valor", `${item.deposit.amount.toLocaleString("pt-MZ")} MT`, "#a3e635"],
+                          ["ID Transação", item.deposit.txId, "rgba(255,255,255,0.75)"],
+                        ].map(([k, v, c]) => (
+                          <div key={k as string} style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>{k}</span>
+                            <span style={{ fontSize: 12, fontWeight: 700, color: c as string }}>{v}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {isPending ? (
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button onClick={() => approveDeposit(item)} disabled={isProcessing}
+                            style={{ flex: 2, padding: "12px", borderRadius: 12, border: "none", background: isProcessing ? "rgba(163,230,53,0.3)" : "linear-gradient(135deg, #a3e635, #84cc16)", color: "#0b0f19", fontWeight: 800, fontSize: 13, cursor: isProcessing ? "not-allowed" : "pointer" }}>
+                            {isProcessing ? "A processar…" : "✅ Aprovar Depósito"}
+                          </button>
+                          <button onClick={() => rejectDeposit(item)} disabled={isProcessing}
+                            style={{ flex: 1, padding: "12px", borderRadius: 12, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.08)", color: "#f87171", fontWeight: 700, fontSize: 13, cursor: isProcessing ? "not-allowed" : "pointer" }}>
+                            ❌ Rejeitar
+                          </button>
+                        </div>
+                      ) : (
+                        <div style={{ textAlign: "center", padding: "6px", borderRadius: 10, background: item.deposit.status === "rejeitado" ? "rgba(239,68,68,0.06)" : "rgba(163,230,53,0.05)" }}>
+                          <span style={{ fontSize: 12, fontWeight: 600, color: item.deposit.status === "rejeitado" ? "#f87171" : "#a3e635" }}>
+                            {item.deposit.status === "rejeitado" ? "❌ Rejeitado e arquivado" : "✅ Aprovado — saldo actualizado"}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </>
+        )}
+
+        {/* ── TAB: LEVANTAMENTOS ── */}
+        {adminTab === "levantamentos" && (
+          <>
+            {/* Filter toggle */}
+            <div style={{ display: "flex", margin: "10px 16px 0", background: "rgba(255,255,255,0.04)", borderRadius: 12, padding: 4 }}>
+              {([["pending", "⏳ Pendentes"], ["all", "📋 Todos"]] as const).map(([id, label]) => (
+                <button key={id} onClick={() => setWithdrawalFilter(id)}
+                  style={{ flex: 1, padding: "8px", borderRadius: 10, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 12, transition: "all 0.2s", background: withdrawalFilter === id ? "#fb923c" : "transparent", color: withdrawalFilter === id ? "#0b0f19" : "rgba(255,255,255,0.4)" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Withdrawal list */}
+            <div style={{ padding: "14px 16px" }}>
+              {loading ? (
+                <div style={{ textAlign: "center", padding: "40px 0", color: "rgba(255,255,255,0.3)" }}>A carregar…</div>
+              ) : withdrawalList.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "48px 0", color: "rgba(255,255,255,0.3)" }}>
+                  <p style={{ fontSize: 40, marginBottom: 12 }}>💸</p>
+                  <p style={{ fontSize: 15, fontWeight: 600 }}>
+                    {withdrawalFilter === "pending" ? "Nenhum levantamento pendente!" : "Sem levantamentos registados."}
+                  </p>
+                </div>
+              ) : (
+                withdrawalList.map(item => {
+                  const isPending = item.withdrawal.status === "pendente";
+                  const isProcessing = processingWithdrawalId === item.withdrawal.id;
+                  const badge = wBadge(item.withdrawal.status);
+                  const borderColor = isPending ? "rgba(251,146,60,0.3)" : item.withdrawal.status === "rejeitado" ? "rgba(239,68,68,0.2)" : "rgba(163,230,53,0.15)";
+                  return (
+                    <div key={item.withdrawal.id} className="glass-card" style={{ padding: "16px", marginBottom: 12, border: `1px solid ${borderColor}`, opacity: isProcessing ? 0.6 : 1, transition: "opacity 0.3s" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: badge.bg, color: badge.color, border: `1px solid ${badge.border}` }}>
+                          {badge.label}
+                        </span>
+                        <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>
+                          {new Date(item.withdrawal.date).toLocaleDateString("pt-MZ", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                        <div style={{ width: 36, height: 36, borderRadius: 10, flexShrink: 0, background: "linear-gradient(135deg, #fb923c, #ea580c)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, color: "#fff", fontSize: 14 }}>
+                          {item.userName[0]?.toUpperCase() ?? "?"}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <p style={{ fontWeight: 700, fontSize: 14, marginBottom: 1 }}>{item.userName}</p>
+                          <p style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.userEmail}</p>
+                        </div>
+                        <span className="badge" style={{ flexShrink: 0 }}>{item.userId}</span>
+                      </div>
+                      <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "12px 14px", marginBottom: 14 }}>
+                        {[
+                          ["Método",       item.withdrawal.method, item.withdrawal.method === "M-Pesa" ? "#a3e635" : "#facc15"],
+                          ["Nº Telemóvel", item.withdrawal.phone,  "rgba(255,255,255,0.75)"],
+                          ["Valor solicitado", `${item.withdrawal.amount.toLocaleString("pt-MZ")} MT`, "#fb923c"],
+                          ["Taxa (10%)",    `−${item.withdrawal.fee.toFixed(2)} MT`,  "#f87171"],
+                          ["Utilizador recebe", `${item.withdrawal.net.toFixed(2)} MT`, "#a3e635"],
+                        ].map(([k, v, c]) => (
+                          <div key={k as string} style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                            <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>{k}</span>
+                            <span style={{ fontSize: 12, fontWeight: 700, color: c as string }}>{v}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {isPending ? (
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button onClick={() => approveWithdrawal(item)} disabled={isProcessing}
+                            style={{ flex: 2, padding: "12px", borderRadius: 12, border: "none", background: isProcessing ? "rgba(251,146,60,0.3)" : "linear-gradient(135deg, #fb923c, #ea580c)", color: "#fff", fontWeight: 800, fontSize: 13, cursor: isProcessing ? "not-allowed" : "pointer" }}>
+                            {isProcessing ? "A processar…" : "✅ Confirmar Envio"}
+                          </button>
+                          <button onClick={() => rejectWithdrawal(item)} disabled={isProcessing}
+                            style={{ flex: 1, padding: "12px", borderRadius: 12, border: "1px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.08)", color: "#f87171", fontWeight: 700, fontSize: 13, cursor: isProcessing ? "not-allowed" : "pointer" }}>
+                            ↩️ Devolver
+                          </button>
+                        </div>
+                      ) : (
+                        <div style={{ textAlign: "center", padding: "6px", borderRadius: 10, background: item.withdrawal.status === "rejeitado" ? "rgba(239,68,68,0.06)" : "rgba(163,230,53,0.05)" }}>
+                          <span style={{ fontSize: 12, fontWeight: 600, color: item.withdrawal.status === "rejeitado" ? "#f87171" : "#a3e635" }}>
+                            {item.withdrawal.status === "rejeitado" ? "↩️ Rejeitado — saldo devolvido" : "✅ Processado — enviado ao utilizador"}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </>
+        )}
+
         <div style={{ height: 24 }} />
       </div>
     </div>
