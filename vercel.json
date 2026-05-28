@@ -1,5 +1,5 @@
 {
-  "buildCommand": "npm install -g pnpm && pnpm install && pnpm --filter @workspace/bloxs-mz run build",
+  "buildCommand": "pnpm install && pnpm --filter @workspace/bloxs-mz run build",
   "outputDirectory": "artifacts/bloxs-mz/dist",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
