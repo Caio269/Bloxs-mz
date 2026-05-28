@@ -3,6 +3,7 @@ import { onAuthStateChanged, signOut, User as FirebaseUser } from "firebase/auth
 import { ref, get, set, update, runTransaction, query as rtdbQuery, orderByChild, equalTo } from "firebase/database";
 import { auth, rtdb, isMockMode } from "./firebase";
 import Login from "./components/Login";
+import AdminDashboard from "./components/AdminDashboard";
 
 // ── Admin password (altere aqui quando quiser mudar) ──────────────────────────
 const ADMIN_PASSWORD = "Bloxs@Admin2025";
@@ -2221,7 +2222,7 @@ export default function App() {
 
   // ── Admin panel (overlay completo) ──
   if (showAdmin) {
-    return <AdminPanel onClose={() => setShowAdmin(false)} />;
+    return <AdminDashboard onClose={() => setShowAdmin(false)} />;
   }
 
   // ── Dashboard ──
