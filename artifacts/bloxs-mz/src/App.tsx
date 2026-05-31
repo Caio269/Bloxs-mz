@@ -425,6 +425,130 @@ function RetentionBar({ retention, max }: { retention: number; max: number }) {
   );
 }
 
+// ── Estagiário Countdown Card ─────────────────────────────────────────────────
+function EstagiarioCard({
+  planState, totalEarned, collected,
+  onActivate, onCollect,
+}: {
+  planState: PlanState;
+  totalEarned: number;
+  collected: boolean;
+  onActivate: () => void;
+  onCollect: () => void;
+}) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const startDate = planState.startDate ? new Date(planState.startDate) : null;
+  const endDate = startDate ? new Date(startDate.getTime() + 30 * 24 * 60 * 60 * 1000) : null;
+  const msLeft = endDate ? Math.max(0, endDate.getTime() - now) : 0;
+  const cycleComplete = !!startDate && now >= (endDate?.getTime() ?? Infinity);
+  const daysPassed = startDate ? Math.floor((now - startDate.getTime()) / (1000 * 60 * 60 * 24)) : 0;
+  const progressPct = Math.min((daysPassed / 30) * 100, 100);
+
+  const dd = Math.floor(msLeft / (1000 * 60 * 60 * 24));
+  const hh = Math.floor((msLeft % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+  const mm = Math.floor((msLeft % (1000 * 60 * 60)) / (1000 * 60));
+  const ss = Math.floor((msLeft % (1000 * 60)) / 1000);
+
+  const endDateStr = endDate
+    ? endDate.toLocaleString("pt-MZ", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "";
+
+  const pad = (n: number) => String(n).padStart(2, "0");
+
+  return (
+    <div className="plan-card" style={{ marginBottom: 14, borderColor: "rgba(251,146,60,0.25)", background: "linear-gradient(135deg, rgba(120,53,15,0.35) 0%, rgba(11,15,25,0.9) 100%)" }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+        <div>
+          <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: "rgba(251,146,60,0.15)", color: "#fb923c", border: "1px solid rgba(251,146,60,0.3)" }}>
+            🎓 Grátis
+          </span>
+          <p style={{ fontSize: 17, fontWeight: 800, marginTop: 8 }}>Estagiário Bloxs</p>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <p style={{ fontSize: 22, fontWeight: 800, color: "#fb923c" }}>10 MT</p>
+          <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>por dia</p>
+        </div>
+      </div>
+
+      {/* Stats row */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+        <div style={{ flex: 1, background: "rgba(251,146,60,0.08)", borderRadius: 10, padding: "10px 12px" }}>
+          <p style={{ fontSize: 10, color: "rgba(251,146,60,0.7)", marginBottom: 2 }}>DIAS PASSADOS</p>
+          <p style={{ fontSize: 18, fontWeight: 800, color: "#fb923c" }}>{daysPassed}/30</p>
+        </div>
+        <div style={{ flex: 1, background: "rgba(163,230,53,0.06)", borderRadius: 10, padding: "10px 12px" }}>
+          <p style={{ fontSize: 10, color: "rgba(163,230,53,0.6)", marginBottom: 2 }}>GANHO ATÉ AGORA</p>
+          <p style={{ fontSize: 18, fontWeight: 800, color: "#a3e635" }}>{totalEarned.toFixed(2)} MT</p>
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      {planState.owned && startDate && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+            <span style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>Progresso do ciclo</span>
+            <span style={{ fontSize: 11, color: "#fb923c", fontWeight: 700 }}>{progressPct.toFixed(0)}%</span>
+          </div>
+          <div style={{ height: 6, borderRadius: 3, background: "rgba(255,255,255,0.07)" }}>
+            <div style={{ height: "100%", borderRadius: 3, width: `${progressPct}%`, background: cycleComplete ? "#a3e635" : "linear-gradient(90deg,#fb923c,#f97316)", transition: "width 0.4s" }} />
+          </div>
+        </div>
+      )}
+
+      {/* Countdown or end-date */}
+      {planState.owned && startDate && !cycleComplete && (
+        <div style={{ background: "rgba(251,146,60,0.07)", border: "1px solid rgba(251,146,60,0.18)", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
+          <p style={{ fontSize: 10, color: "rgba(251,146,60,0.7)", fontWeight: 700, marginBottom: 8, letterSpacing: "0.5px" }}>
+            ⏳ LEVANTAMENTO DISPONÍVEL EM
+          </p>
+          {/* Live countdown */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            {[{ v: dd, l: "DIAS" }, { v: hh, l: "HORAS" }, { v: mm, l: "MIN" }, { v: ss, l: "SEG" }].map(({ v, l }) => (
+              <div key={l} style={{ flex: 1, background: "rgba(0,0,0,0.3)", borderRadius: 8, padding: "8px 4px", textAlign: "center" }}>
+                <p style={{ fontSize: 20, fontWeight: 800, color: "#fb923c", lineHeight: 1 }}>{pad(v)}</p>
+                <p style={{ fontSize: 8, color: "rgba(255,255,255,0.3)", marginTop: 3, letterSpacing: "0.5px" }}>{l}</p>
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", textAlign: "center" }}>
+            📅 Data de término: <strong style={{ color: "rgba(251,146,60,0.8)" }}>{endDateStr}</strong>
+          </p>
+        </div>
+      )}
+
+      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 14 }}>
+        💡 90% vai ao saldo · 10% retido · Ciclo de 30 dias · Teto: 300 MT
+      </div>
+
+      {!planState.owned ? (
+        <button className="btn-primary" style={{ background: "linear-gradient(135deg,#fb923c,#f97316)", boxShadow: "0 4px 16px rgba(251,146,60,0.3)" }} onClick={onActivate}>
+          🎓 Activar Plano Estagiário — Grátis
+        </button>
+      ) : cycleComplete ? (
+        <div style={{ background: "rgba(163,230,53,0.08)", border: "1px solid rgba(163,230,53,0.2)", borderRadius: 12, padding: "14px 16px", textAlign: "center" }}>
+          <p style={{ color: "#a3e635", fontSize: 14, fontWeight: 700 }}>🎉 Ciclo de 30 dias concluído!</p>
+          <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, marginTop: 4 }}>Pode efectuar o levantamento do seu saldo.</p>
+        </div>
+      ) : collected ? (
+        <div style={{ background: "rgba(251,146,60,0.06)", borderRadius: 12, padding: "12px 16px", textAlign: "center" }}>
+          <p style={{ color: "#fb923c", fontSize: 13, fontWeight: 600 }}>✅ Lucro recolhido hoje</p>
+          <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 11, marginTop: 4 }}>Próxima recolha: amanhã</p>
+        </div>
+      ) : (
+        <button style={{ width: "100%", padding: "14px", borderRadius: 14, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 14, background: "linear-gradient(135deg,#fb923c,#f97316)", color: "#fff", boxShadow: "0 4px 16px rgba(251,146,60,0.3)" }} onClick={onCollect}>
+          💰 Recolher Lucro Diário — 10 MT
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── Families Tab ──────────────────────────────────────────────────────────────
 function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => void }) {
   const [toast, setToast] = useState("");
@@ -515,81 +639,18 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
         const collected = planState.owned && planState.lastCollect === todayStr();
 
         if (plan.id === "estagiario") {
-          const startDate = planState.startDate ? new Date(planState.startDate) : null;
-          const daysPassed = startDate ? Math.floor((Date.now() - startDate.getTime()) / (1000 * 60 * 60 * 24)) : 0;
-          const daysRemaining = Math.max(0, 30 - daysPassed);
-          const cycleComplete = daysPassed >= 30;
-          const progressPct = Math.min((daysPassed / 30) * 100, 100);
           const totalEarned = user.transactions
             .filter(t => t.type === "credit" && t.description.includes("estagiario"))
             .reduce((s, t) => s + t.amount, 0);
           return (
-            <div key={plan.id} className="plan-card" style={{ marginBottom: 14, borderColor: "rgba(251,146,60,0.25)", background: "linear-gradient(135deg, rgba(120,53,15,0.35) 0%, rgba(11,15,25,0.9) 100%)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-                <div>
-                  <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: "rgba(251,146,60,0.15)", color: "#fb923c", border: "1px solid rgba(251,146,60,0.3)" }}>
-                    🎓 Grátis
-                  </span>
-                  <p style={{ fontSize: 17, fontWeight: 800, marginTop: 8 }}>{plan.name}</p>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <p style={{ fontSize: 22, fontWeight: 800, color: "#fb923c" }}>10 MT</p>
-                  <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>por dia</p>
-                </div>
-              </div>
-
-              <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-                <div style={{ flex: 1, background: "rgba(251,146,60,0.08)", borderRadius: 10, padding: "10px 12px" }}>
-                  <p style={{ fontSize: 10, color: "rgba(251,146,60,0.7)", marginBottom: 2 }}>DIAS RESTANTES</p>
-                  <p style={{ fontSize: 18, fontWeight: 800, color: "#fb923c" }}>{daysRemaining}</p>
-                </div>
-                <div style={{ flex: 1, background: "rgba(163,230,53,0.06)", borderRadius: 10, padding: "10px 12px" }}>
-                  <p style={{ fontSize: 10, color: "rgba(163,230,53,0.6)", marginBottom: 2 }}>GANHO ATÉ AGORA</p>
-                  <p style={{ fontSize: 18, fontWeight: 800, color: "#a3e635" }}>{totalEarned.toFixed(2)} MT</p>
-                </div>
-              </div>
-
-              {planState.owned && startDate && (
-                <div style={{ marginBottom: 14 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                    <span style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>Progresso do ciclo</span>
-                    <span style={{ fontSize: 11, color: "#fb923c", fontWeight: 700 }}>{daysPassed}/30 dias</span>
-                  </div>
-                  <div style={{ height: 6, borderRadius: 3, background: "rgba(255,255,255,0.07)" }}>
-                    <div style={{ height: "100%", borderRadius: 3, width: `${progressPct}%`, background: cycleComplete ? "#a3e635" : "linear-gradient(90deg,#fb923c,#f97316)", transition: "width 0.4s" }} />
-                  </div>
-                  <p style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 4 }}>
-                    {cycleComplete
-                      ? "✅ Ciclo completo — levantamento disponível!"
-                      : `Teto de 300 MT · Levantamento disponível em ${daysRemaining} dia${daysRemaining !== 1 ? "s" : ""}`}
-                  </p>
-                </div>
-              )}
-
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 14 }}>
-                💡 90% vai ao saldo · 10% retido · Ciclo de 30 dias
-              </div>
-
-              {!planState.owned ? (
-                <button className="btn-primary" style={{ background: "linear-gradient(135deg,#fb923c,#f97316)", boxShadow: "0 4px 16px rgba(251,146,60,0.3)" }} onClick={() => buyPlan(plan.id, plan.cost)}>
-                  🎓 Activar Plano Estagiário — Grátis
-                </button>
-              ) : cycleComplete ? (
-                <div style={{ background: "rgba(163,230,53,0.08)", border: "1px solid rgba(163,230,53,0.2)", borderRadius: 12, padding: "14px 16px", textAlign: "center" }}>
-                  <p style={{ color: "#a3e635", fontSize: 14, fontWeight: 700 }}>🎉 Ciclo de 30 dias concluído!</p>
-                  <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, marginTop: 4 }}>Pode efectuar o levantamento do seu saldo.</p>
-                </div>
-              ) : collected ? (
-                <div style={{ background: "rgba(251,146,60,0.06)", borderRadius: 12, padding: "12px 16px", textAlign: "center" }}>
-                  <p style={{ color: "#fb923c", fontSize: 13, fontWeight: 600 }}>✅ Lucro recolhido hoje</p>
-                  <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 11, marginTop: 4 }}>Próxima recolha: amanhã</p>
-                </div>
-              ) : (
-                <button style={{ width: "100%", padding: "14px", borderRadius: 14, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 14, background: "linear-gradient(135deg,#fb923c,#f97316)", color: "#fff", boxShadow: "0 4px 16px rgba(251,146,60,0.3)" }} onClick={() => collectProfit(plan.id, plan.daily)}>
-                  💰 Recolher Lucro Diário — 10 MT
-                </button>
-              )}
-            </div>
+            <EstagiarioCard
+              key="estagiario"
+              planState={planState}
+              totalEarned={totalEarned}
+              collected={collected}
+              onActivate={() => buyPlan("estagiario", 0)}
+              onCollect={() => collectProfit("estagiario", 10)}
+            />
           );
         }
 
