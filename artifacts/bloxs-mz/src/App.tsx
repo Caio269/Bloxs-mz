@@ -427,12 +427,13 @@ function RetentionBar({ retention, max }: { retention: number; max: number }) {
 
 // ── Estagiário Countdown Card ─────────────────────────────────────────────────
 function EstagiarioCard({
-  planState, totalEarned, collected,
+  planState, totalEarned, collected, blocked,
   onActivate, onCollect,
 }: {
   planState: PlanState;
   totalEarned: number;
   collected: boolean;
+  blocked: boolean;
   onActivate: () => void;
   onCollect: () => void;
 }) {
@@ -526,14 +527,29 @@ function EstagiarioCard({
         💡 90% vai ao saldo · 10% retido · Ciclo de 30 dias · Teto: 300 MT
       </div>
 
-      {!planState.owned ? (
+      {/* ── Estado do botão ── */}
+      {blocked ? (
+        <div style={{ background: "rgba(239,68,68,0.08)", border: "1.5px solid rgba(239,68,68,0.3)", borderRadius: 14, padding: "16px", textAlign: "center" }}>
+          <p style={{ color: "#f87171", fontSize: 15, fontWeight: 800, marginBottom: 6 }}>🚫 Plano Bloqueado</p>
+          <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, lineHeight: 1.5 }}>
+            Este plano foi desactivado porque adquiriste um plano pago.<br />O estágio não pode ser combinado com outros planos.
+          </p>
+        </div>
+      ) : !planState.owned ? (
         <button className="btn-primary" style={{ background: "linear-gradient(135deg,#fb923c,#f97316)", boxShadow: "0 4px 16px rgba(251,146,60,0.3)" }} onClick={onActivate}>
           🎓 Activar Plano Estagiário — Grátis
         </button>
       ) : cycleComplete ? (
-        <div style={{ background: "rgba(163,230,53,0.08)", border: "1px solid rgba(163,230,53,0.2)", borderRadius: 12, padding: "14px 16px", textAlign: "center" }}>
-          <p style={{ color: "#a3e635", fontSize: 14, fontWeight: 700 }}>🎉 Ciclo de 30 dias concluído!</p>
-          <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, marginTop: 4 }}>Pode efectuar o levantamento do seu saldo.</p>
+        <div style={{ background: "linear-gradient(135deg,rgba(163,230,53,0.12),rgba(74,222,128,0.08))", border: "1.5px solid rgba(163,230,53,0.35)", borderRadius: 14, padding: "18px 16px", textAlign: "center" }}>
+          <p style={{ fontSize: 22, marginBottom: 8 }}>🎓</p>
+          <p style={{ color: "#a3e635", fontSize: 18, fontWeight: 900, letterSpacing: "0.5px", marginBottom: 6 }}>Estágio Concluído</p>
+          <p style={{ color: "rgba(255,255,255,0.55)", fontSize: 11, lineHeight: 1.5 }}>
+            O ciclo de 30 dias terminou. Os rendimentos foram encerrados.<br />
+            Pode agora efectuar o levantamento do saldo acumulado.
+          </p>
+          <div style={{ marginTop: 12, padding: "8px 12px", background: "rgba(163,230,53,0.08)", borderRadius: 10 }}>
+            <p style={{ fontSize: 12, color: "#a3e635", fontWeight: 700 }}>Total ganho: {totalEarned.toFixed(2)} MT</p>
+          </div>
         </div>
       ) : collected ? (
         <div style={{ background: "rgba(251,146,60,0.06)", borderRadius: 12, padding: "12px 16px", textAlign: "center" }}>
@@ -565,7 +581,16 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
     }
     const users = loadUsers();
     const updated = { ...user };
-    if (cost > 0) updated.balance -= cost;
+    if (cost > 0) {
+      updated.balance -= cost;
+      // Bloqueio por Compra: desactivar Estagiário ao adquirir plano pago
+      if (updated.plans["estagiario"]?.owned) {
+        updated.plans = {
+          ...updated.plans,
+          estagiario: { owned: false, lastCollect: null, startDate: null },
+        };
+      }
+    }
     updated.plans = { ...updated.plans, [planId]: { owned: true, lastCollect: null, startDate: new Date().toISOString() } };
     if (cost > 0) {
       updated.transactions = [
@@ -611,7 +636,7 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
     const updated = { ...user };
     updated.balance += toBalance;
     updated.retention = Math.min(updated.retention + toRetention, updated.retentionMax);
-    updated.plans = { ...updated.plans, [planId]: { owned: true, lastCollect: todayStr() } };
+    updated.plans = { ...updated.plans, [planId]: { ...updated.plans[planId], owned: true, lastCollect: todayStr() } };
     updated.transactions = [
       { id: genId(), type: "credit", amount: toBalance, description: `Lucro diário — ${planId} (90%)`, date: new Date().toISOString() },
       ...updated.transactions,
@@ -642,12 +667,14 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
           const totalEarned = user.transactions
             .filter(t => t.type === "credit" && t.description.includes("estagiario"))
             .reduce((s, t) => s + t.amount, 0);
+          const hasPaidPlan = PLANS.filter(p => p.cost > 0).some(p => user.plans[p.id]?.owned);
           return (
             <EstagiarioCard
               key="estagiario"
               planState={planState}
               totalEarned={totalEarned}
               collected={collected}
+              blocked={hasPaidPlan}
               onActivate={() => buyPlan("estagiario", 0)}
               onCollect={() => collectProfit("estagiario", 10)}
             />
