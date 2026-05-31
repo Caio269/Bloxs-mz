@@ -19,6 +19,7 @@ const MOCK_USER: User = {
   retention: 180,
   retentionMax: 500,
   plans: {
+    estagiario: { owned: true, lastCollect: null, startDate: new Date(Date.now() - 86400000 * 5).toISOString() },
     ferro: { owned: true,  lastCollect: null },
     cox:   { owned: true,  lastCollect: new Date().toDateString() },
     sc:    { owned: false, lastCollect: null },
@@ -64,6 +65,7 @@ interface User {
 interface PlanState {
   owned: boolean;
   lastCollect: string | null;
+  startDate?: string | null;
 }
 
 interface Transaction {
@@ -102,9 +104,10 @@ interface TeamMember {
 }
 
 const PLANS = [
-  { id: "ferro", name: "Família Ferro 2x", cost: 600, daily: 20, color: "from-slate-700 to-slate-800", badge: "Básico" },
-  { id: "cox", name: "Família Cox 2x", cost: 1800, daily: 60, color: "from-blue-900 to-indigo-900", badge: "Popular" },
-  { id: "sc", name: "Família S.C 2x", cost: 9000, daily: 300, color: "from-purple-900 to-violet-900", badge: "Premium" },
+  { id: "estagiario", name: "Estagiário Bloxs", cost: 0, daily: 10, maxEarnings: 300, duration: 30, color: "from-amber-800 to-orange-900", badge: "Grátis" },
+  { id: "ferro", name: "Família Ferro 2x", cost: 600, daily: 20, maxEarnings: null, duration: null, color: "from-slate-700 to-slate-800", badge: "Básico" },
+  { id: "cox", name: "Família Cox 2x", cost: 1800, daily: 60, maxEarnings: null, duration: null, color: "from-blue-900 to-indigo-900", badge: "Popular" },
+  { id: "sc", name: "Família S.C 2x", cost: 9000, daily: 300, maxEarnings: null, duration: null, color: "from-purple-900 to-violet-900", badge: "Premium" },
 ];
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
@@ -237,7 +240,12 @@ function AuthScreen({ onLogin }: { onLogin: (u: User) => void }) {
       balance: 0,
       retention: 0,
       retentionMax: 500,
-      plans: { ferro: { owned: false, lastCollect: null }, cox: { owned: false, lastCollect: null }, sc: { owned: false, lastCollect: null } },
+      plans: {
+        estagiario: { owned: true, lastCollect: null, startDate: new Date().toISOString() },
+        ferro: { owned: false, lastCollect: null },
+        cox: { owned: false, lastCollect: null },
+        sc: { owned: false, lastCollect: null },
+      },
       transactions: [],
       withdrawals: [],
       deposits: [],
@@ -427,22 +435,24 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
   }
 
   function buyPlan(planId: string, cost: number) {
-    if (user.balance < cost) {
+    if (cost > 0 && user.balance < cost) {
       showToast("Saldo insuficiente para adquirir este plano.");
       return;
     }
     const users = loadUsers();
     const updated = { ...user };
-    updated.balance -= cost;
-    updated.plans = { ...updated.plans, [planId]: { owned: true, lastCollect: null } };
-    updated.transactions = [
-      { id: genId(), type: "debit", amount: cost, description: `Compra do plano ${planId}`, date: new Date().toISOString() },
-      ...updated.transactions,
-    ];
+    if (cost > 0) updated.balance -= cost;
+    updated.plans = { ...updated.plans, [planId]: { owned: true, lastCollect: null, startDate: new Date().toISOString() } };
+    if (cost > 0) {
+      updated.transactions = [
+        { id: genId(), type: "debit", amount: cost, description: `Compra do plano ${planId}`, date: new Date().toISOString() },
+        ...updated.transactions,
+      ];
+    }
     users[user.email] = updated;
     saveUsers(users);
     onUpdate(updated);
-    showToast("Plano adquirido com sucesso!");
+    showToast(cost === 0 ? "✅ Plano Estagiário activado! Ciclo de 30 dias iniciado." : "Plano adquirido com sucesso!");
   }
 
   function collectProfit(planId: string, daily: number) {
@@ -452,6 +462,25 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
       showToast("Já recolheu o lucro hoje. Volte amanhã!");
       return;
     }
+
+    if (planId === "estagiario") {
+      const startDate = plan.startDate ? new Date(plan.startDate) : null;
+      if (startDate) {
+        const daysPassed = Math.floor((Date.now() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+        if (daysPassed >= 30) {
+          showToast("O ciclo de 30 dias do Plano Estagiário está concluído. Pode efectuar o levantamento.");
+          return;
+        }
+      }
+      const totalEarned = user.transactions
+        .filter(t => t.type === "credit" && t.description.includes("estagiario"))
+        .reduce((s, t) => s + t.amount / 0.9, 0);
+      if (totalEarned >= 300) {
+        showToast("Atingiu o teto de 300 MT do Plano Estagiário.");
+        return;
+      }
+    }
+
     const toBalance = daily * 0.9;
     const toRetention = daily * 0.1;
     const users = loadUsers();
@@ -481,9 +510,89 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
       </p>
 
       {PLANS.map(plan => {
-        const planState = user.plans[plan.id];
+        const planState = user.plans[plan.id] ?? { owned: false, lastCollect: null, startDate: null };
         const canCollect = planState.owned && planState.lastCollect !== todayStr();
         const collected = planState.owned && planState.lastCollect === todayStr();
+
+        if (plan.id === "estagiario") {
+          const startDate = planState.startDate ? new Date(planState.startDate) : null;
+          const daysPassed = startDate ? Math.floor((Date.now() - startDate.getTime()) / (1000 * 60 * 60 * 24)) : 0;
+          const daysRemaining = Math.max(0, 30 - daysPassed);
+          const cycleComplete = daysPassed >= 30;
+          const progressPct = Math.min((daysPassed / 30) * 100, 100);
+          const totalEarned = user.transactions
+            .filter(t => t.type === "credit" && t.description.includes("estagiario"))
+            .reduce((s, t) => s + t.amount, 0);
+          return (
+            <div key={plan.id} className="plan-card" style={{ marginBottom: 14, borderColor: "rgba(251,146,60,0.25)", background: "linear-gradient(135deg, rgba(120,53,15,0.35) 0%, rgba(11,15,25,0.9) 100%)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                <div>
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: "3px 10px", borderRadius: 20, background: "rgba(251,146,60,0.15)", color: "#fb923c", border: "1px solid rgba(251,146,60,0.3)" }}>
+                    🎓 Grátis
+                  </span>
+                  <p style={{ fontSize: 17, fontWeight: 800, marginTop: 8 }}>{plan.name}</p>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <p style={{ fontSize: 22, fontWeight: 800, color: "#fb923c" }}>10 MT</p>
+                  <p style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>por dia</p>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+                <div style={{ flex: 1, background: "rgba(251,146,60,0.08)", borderRadius: 10, padding: "10px 12px" }}>
+                  <p style={{ fontSize: 10, color: "rgba(251,146,60,0.7)", marginBottom: 2 }}>DIAS RESTANTES</p>
+                  <p style={{ fontSize: 18, fontWeight: 800, color: "#fb923c" }}>{daysRemaining}</p>
+                </div>
+                <div style={{ flex: 1, background: "rgba(163,230,53,0.06)", borderRadius: 10, padding: "10px 12px" }}>
+                  <p style={{ fontSize: 10, color: "rgba(163,230,53,0.6)", marginBottom: 2 }}>GANHO ATÉ AGORA</p>
+                  <p style={{ fontSize: 18, fontWeight: 800, color: "#a3e635" }}>{totalEarned.toFixed(2)} MT</p>
+                </div>
+              </div>
+
+              {planState.owned && startDate && (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, color: "rgba(255,255,255,0.4)" }}>Progresso do ciclo</span>
+                    <span style={{ fontSize: 11, color: "#fb923c", fontWeight: 700 }}>{daysPassed}/30 dias</span>
+                  </div>
+                  <div style={{ height: 6, borderRadius: 3, background: "rgba(255,255,255,0.07)" }}>
+                    <div style={{ height: "100%", borderRadius: 3, width: `${progressPct}%`, background: cycleComplete ? "#a3e635" : "linear-gradient(90deg,#fb923c,#f97316)", transition: "width 0.4s" }} />
+                  </div>
+                  <p style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 4 }}>
+                    {cycleComplete
+                      ? "✅ Ciclo completo — levantamento disponível!"
+                      : `Teto de 300 MT · Levantamento disponível em ${daysRemaining} dia${daysRemaining !== 1 ? "s" : ""}`}
+                  </p>
+                </div>
+              )}
+
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 14 }}>
+                💡 90% vai ao saldo · 10% retido · Ciclo de 30 dias
+              </div>
+
+              {!planState.owned ? (
+                <button className="btn-primary" style={{ background: "linear-gradient(135deg,#fb923c,#f97316)", boxShadow: "0 4px 16px rgba(251,146,60,0.3)" }} onClick={() => buyPlan(plan.id, plan.cost)}>
+                  🎓 Activar Plano Estagiário — Grátis
+                </button>
+              ) : cycleComplete ? (
+                <div style={{ background: "rgba(163,230,53,0.08)", border: "1px solid rgba(163,230,53,0.2)", borderRadius: 12, padding: "14px 16px", textAlign: "center" }}>
+                  <p style={{ color: "#a3e635", fontSize: 14, fontWeight: 700 }}>🎉 Ciclo de 30 dias concluído!</p>
+                  <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 11, marginTop: 4 }}>Pode efectuar o levantamento do seu saldo.</p>
+                </div>
+              ) : collected ? (
+                <div style={{ background: "rgba(251,146,60,0.06)", borderRadius: 12, padding: "12px 16px", textAlign: "center" }}>
+                  <p style={{ color: "#fb923c", fontSize: 13, fontWeight: 600 }}>✅ Lucro recolhido hoje</p>
+                  <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 11, marginTop: 4 }}>Próxima recolha: amanhã</p>
+                </div>
+              ) : (
+                <button style={{ width: "100%", padding: "14px", borderRadius: 14, border: "none", cursor: "pointer", fontWeight: 700, fontSize: 14, background: "linear-gradient(135deg,#fb923c,#f97316)", color: "#fff", boxShadow: "0 4px 16px rgba(251,146,60,0.3)" }} onClick={() => collectProfit(plan.id, plan.daily)}>
+                  💰 Recolher Lucro Diário — 10 MT
+                </button>
+              )}
+            </div>
+          );
+        }
+
         return (
           <div key={plan.id} className="plan-card" style={{ marginBottom: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
@@ -630,6 +739,7 @@ function FinancasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
   const [wAmount, setWAmount] = useState("");
   const [wMethod, setWMethod] = useState<"M-Pesa" | "e-Mola">("M-Pesa");
   const [wPhone, setWPhone] = useState(user.phone || "");
+  const [withdrawBlockMsg, setWithdrawBlockMsg] = useState("");
 
   function showToast(msg: string) {
     setToast(msg);
@@ -705,6 +815,18 @@ function FinancasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
 
   async function handleWithdraw(e: React.FormEvent) {
     e.preventDefault();
+    setWithdrawBlockMsg("");
+
+    const estagiarioPlan = user.plans["estagiario"];
+    if (estagiarioPlan?.owned && estagiarioPlan.startDate) {
+      const startDate = new Date(estagiarioPlan.startDate);
+      const daysPassed = Math.floor((Date.now() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+      if (daysPassed < 30) {
+        setWithdrawBlockMsg("Plano Estagiário: O levantamento do saldo só estará disponível após a conclusão do ciclo de teste de 30 dias.");
+        return;
+      }
+    }
+
     const amt = parseFloat(wAmount);
     if (isNaN(amt) || amt <= 0) { showToast("Insira um valor válido."); return; }
     if (amt > user.balance) { showToast("Saldo insuficiente."); return; }
@@ -923,6 +1045,18 @@ function FinancasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
       {/* ── LEVANTAR ── */}
       {section === "withdraw" && (
         <div>
+          {withdrawBlockMsg && (
+            <div style={{
+              margin: "12px 16px 0", padding: "16px",
+              background: "rgba(239,68,68,0.12)",
+              border: "1.5px solid rgba(239,68,68,0.4)",
+              borderRadius: 14,
+            }}>
+              <p style={{ fontSize: 13, color: "#f87171", fontWeight: 800, marginBottom: 6 }}>🔒 Levantamento Bloqueado</p>
+              <p style={{ fontSize: 12, color: "rgba(255,255,255,0.75)", lineHeight: 1.5 }}>{withdrawBlockMsg}</p>
+            </div>
+          )}
+
           <div style={{ margin: "12px 16px 0", padding: "12px 16px", background: "rgba(250,204,21,0.07)", border: "1px solid rgba(250,204,21,0.18)", borderRadius: 12 }}>
             <p style={{ fontSize: 12, color: "#facc15", fontWeight: 600 }}>⚠️ Taxa de Levantamento</p>
             <p style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", marginTop: 4 }}>
