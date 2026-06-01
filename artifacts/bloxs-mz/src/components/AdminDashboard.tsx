@@ -123,6 +123,50 @@ function StatusBadge({ status, type }: { status: string; type: "deposit" | "with
 // ── CLIENT DETAIL VIEW ────────────────────────────────────────────────────────
 function ClientDetail({ client, onBack }: { client: ClientRecord; onBack: () => void }) {
   const [txFilter, setTxFilter] = useState<"all" | "credit" | "debit">("all");
+  const [currentBalance, setCurrentBalance] = useState(client.balance);
+  const [editOpen, setEditOpen] = useState(false);
+  const [newBalanceVal, setNewBalanceVal] = useState("");
+  const [balanceSaving, setBalanceSaving] = useState(false);
+  const [balanceToast, setBalanceToast] = useState("");
+  const [confirmStep, setConfirmStep] = useState(false);
+
+  function showBToast(msg: string) { setBalanceToast(msg); setTimeout(() => setBalanceToast(""), 3500); }
+
+  async function handleSaveBalance(e: FormEvent) {
+    e.preventDefault();
+    const parsed = parseFloat(newBalanceVal);
+    if (isNaN(parsed) || parsed < 0) { showBToast("❌ Valor inválido."); return; }
+    if (!confirmStep) { setConfirmStep(true); return; }
+
+    setBalanceSaving(true);
+    try {
+      const now = new Date().toISOString();
+      const diff = parsed - currentBalance;
+      const txId = "ADM" + Math.random().toString(36).substring(2, 8).toUpperCase();
+      const auditTx = {
+        id: txId,
+        type: diff >= 0 ? "credit" : "debit",
+        amount: Math.abs(diff),
+        description: `Correcção de saldo pelo administrador (${diff >= 0 ? "+" : ""}${diff.toFixed(2)} MT)`,
+        date: now,
+      };
+
+      await Promise.all([
+        set(ref(rtdb, `usuarios/${client.uid}/saldo`), parsed),
+        set(ref(rtdb, `usuarios/${client.uid}/transacoes/${txId}`), auditTx),
+      ]);
+
+      setCurrentBalance(parsed);
+      setNewBalanceVal("");
+      setEditOpen(false);
+      setConfirmStep(false);
+      showBToast(`✅ Saldo actualizado para ${fmtMT(parsed)}`);
+    } catch {
+      showBToast("❌ Erro ao actualizar saldo. Tente novamente.");
+    } finally {
+      setBalanceSaving(false);
+    }
+  }
 
   const filtered = client.transactions
     .filter(t => txFilter === "all" || t.type === txFilter)
@@ -135,6 +179,7 @@ function ClientDetail({ client, onBack }: { client: ClientRecord; onBack: () => 
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      {balanceToast && <Toast msg={balanceToast} />}
       {/* Back header */}
       <div style={{
         display: "flex", alignItems: "center", gap: 12,
@@ -156,12 +201,27 @@ function ClientDetail({ client, onBack }: { client: ClientRecord; onBack: () => 
         {/* Balance Card */}
         <div style={{
           background: "linear-gradient(135deg, rgba(163,230,53,0.12) 0%, rgba(11,15,25,0.9) 100%)",
-          border: "1px solid rgba(163,230,53,0.25)", borderRadius: 20, padding: "20px 20px 16px", marginBottom: 14,
+          border: "1px solid rgba(163,230,53,0.25)", borderRadius: 20, padding: "20px 20px 16px", marginBottom: 10,
         }}>
-          <p style={{ fontSize: 12, color: "rgba(255,255,255,0.45)", marginBottom: 6 }}>💰 Saldo Atual</p>
-          <p style={{ fontSize: 36, fontWeight: 800, letterSpacing: "-1px", color: "#a3e635" }}>
-            {fmtMT(client.balance)}
-          </p>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div>
+              <p style={{ fontSize: 12, color: "rgba(255,255,255,0.45)", marginBottom: 6 }}>💰 Saldo Atual</p>
+              <p style={{ fontSize: 36, fontWeight: 800, letterSpacing: "-1px", color: "#a3e635" }}>
+                {fmtMT(currentBalance)}
+              </p>
+            </div>
+            <button
+              onClick={() => { setEditOpen(!editOpen); setConfirmStep(false); setNewBalanceVal(""); }}
+              style={{
+                background: editOpen ? "rgba(239,68,68,0.15)" : "rgba(250,204,21,0.12)",
+                border: `1px solid ${editOpen ? "rgba(239,68,68,0.3)" : "rgba(250,204,21,0.3)"}`,
+                borderRadius: 10, padding: "8px 14px", cursor: "pointer",
+                color: editOpen ? "#f87171" : "#facc15", fontSize: 12, fontWeight: 700,
+              }}
+            >
+              {editOpen ? "✕ Cancelar" : "✏️ Editar Saldo"}
+            </button>
+          </div>
           <div style={{ display: "flex", gap: 16, marginTop: 14 }}>
             <div style={{ flex: 1, background: "rgba(163,230,53,0.07)", borderRadius: 10, padding: "10px 12px" }}>
               <p style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", marginBottom: 4 }}>Total Créditos</p>
@@ -173,6 +233,79 @@ function ClientDetail({ client, onBack }: { client: ClientRecord; onBack: () => 
             </div>
           </div>
         </div>
+
+        {/* ── Balance Editor Panel ── */}
+        {editOpen && (
+          <div style={{
+            background: "rgba(250,204,21,0.05)",
+            border: "1.5px solid rgba(250,204,21,0.25)",
+            borderRadius: 16, padding: "16px", marginBottom: 14,
+          }}>
+            <p style={{ fontSize: 13, fontWeight: 800, color: "#facc15", marginBottom: 4 }}>⚠️ Correcção de Saldo</p>
+            <p style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", marginBottom: 14, lineHeight: 1.5 }}>
+              Define o novo saldo exacto para <strong style={{ color: "rgba(255,255,255,0.7)" }}>{client.name}</strong>.
+              Uma transação de auditoria será criada automaticamente.
+            </p>
+
+            <form onSubmit={handleSaveBalance}>
+              <div style={{ marginBottom: 12 }}>
+                <label style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", display: "block", marginBottom: 6, fontWeight: 600 }}>
+                  Novo saldo (MT)
+                </label>
+                <input
+                  className="bloxs-input"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder={`Actual: ${currentBalance.toFixed(2)} MT`}
+                  value={newBalanceVal}
+                  onChange={e => { setNewBalanceVal(e.target.value); setConfirmStep(false); }}
+                  disabled={balanceSaving}
+                  style={{ fontSize: 16, fontWeight: 700 }}
+                />
+                {newBalanceVal && !isNaN(parseFloat(newBalanceVal)) && (
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, padding: "8px 12px", background: "rgba(0,0,0,0.2)", borderRadius: 10 }}>
+                    <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Diferença:</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: parseFloat(newBalanceVal) >= currentBalance ? "#a3e635" : "#f87171" }}>
+                      {parseFloat(newBalanceVal) >= currentBalance ? "+" : ""}{(parseFloat(newBalanceVal) - currentBalance).toFixed(2)} MT
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {confirmStep ? (
+                <div>
+                  <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 12, padding: "12px", marginBottom: 12, textAlign: "center" }}>
+                    <p style={{ color: "#f87171", fontSize: 13, fontWeight: 700, marginBottom: 4 }}>⚠️ Confirmar alteração?</p>
+                    <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 11 }}>
+                      Saldo: <strong style={{ color: "#f87171" }}>{fmtMT(currentBalance)}</strong> → <strong style={{ color: "#a3e635" }}>{fmtMT(parseFloat(newBalanceVal))}</strong>
+                    </p>
+                  </div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button type="button" onClick={() => setConfirmStep(false)} disabled={balanceSaving}
+                      style={{ flex: 1, padding: "12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.1)", background: "transparent", color: "rgba(255,255,255,0.5)", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+                      Cancelar
+                    </button>
+                    <button type="submit" disabled={balanceSaving}
+                      style={{ flex: 2, padding: "12px", borderRadius: 12, border: "none", background: "linear-gradient(135deg,#ef4444,#dc2626)", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>
+                      {balanceSaving ? "A guardar…" : "✅ Confirmar e Guardar"}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button type="submit" disabled={!newBalanceVal || balanceSaving}
+                  style={{
+                    width: "100%", padding: "13px", borderRadius: 12, border: "none", cursor: "pointer",
+                    background: !newBalanceVal ? "rgba(255,255,255,0.06)" : "linear-gradient(135deg,#facc15,#eab308)",
+                    color: !newBalanceVal ? "rgba(255,255,255,0.3)" : "#0b0f19",
+                    fontSize: 13, fontWeight: 700,
+                  }}>
+                  Definir Novo Saldo →
+                </button>
+              )}
+            </form>
+          </div>
+        )}
 
         {/* Info row */}
         <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
