@@ -104,9 +104,10 @@ export default function Login({ onSuccess, isMockMode = false, onMockLogin }: Pr
         retencao: 0,
         retencaoMax: 500,
         planos: {
-          ferro: { ativo: false, ultimaColeta: null },
-          cox:   { ativo: false, ultimaColeta: null },
-          sc:    { ativo: false, ultimaColeta: null },
+          estagiario: { ativo: true, ultimaColeta: null, dataInicio: now },
+          ferro: { ativo: false, ultimaColeta: null, dataInicio: null },
+          cox:   { ativo: false, ultimaColeta: null, dataInicio: null },
+          sc:    { ativo: false, ultimaColeta: null, dataInicio: null },
         },
         transacoes: {},
         levantamentos: {},

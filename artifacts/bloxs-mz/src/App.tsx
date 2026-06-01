@@ -2336,6 +2336,7 @@ export default function App() {
           password: "", phone: "",
           balance: 0, retention: 0, retentionMax: 500,
           plans: {
+            estagiario: { owned: false, lastCollect: null, startDate: null },
             ferro: { owned: false, lastCollect: null },
             cox:   { owned: false, lastCollect: null },
             sc:    { owned: false, lastCollect: null },
@@ -2361,6 +2362,11 @@ export default function App() {
               retention: data.retencao ?? 0,
               retentionMax: data.retencaoMax ?? 500,
               plans: {
+                estagiario: {
+                  owned: data.planos?.estagiario?.ativo ?? false,
+                  lastCollect: data.planos?.estagiario?.ultimaColeta ?? null,
+                  startDate: data.planos?.estagiario?.dataInicio ?? null,
+                },
                 ferro: { owned: data.planos?.ferro?.ativo ?? false, lastCollect: data.planos?.ferro?.ultimaColeta ?? null },
                 cox:   { owned: data.planos?.cox?.ativo   ?? false, lastCollect: data.planos?.cox?.ultimaColeta   ?? null },
                 sc:    { owned: data.planos?.sc?.ativo    ?? false, lastCollect: data.planos?.sc?.ultimaColeta    ?? null },
@@ -2408,9 +2414,14 @@ export default function App() {
         saldo: updated.balance,
         retencao: updated.retention,
         planos: {
-          ferro: { ativo: updated.plans.ferro.owned, ultimaColeta: updated.plans.ferro.lastCollect },
-          cox:   { ativo: updated.plans.cox.owned,   ultimaColeta: updated.plans.cox.lastCollect },
-          sc:    { ativo: updated.plans.sc.owned,    ultimaColeta: updated.plans.sc.lastCollect },
+          estagiario: {
+            ativo: updated.plans.estagiario?.owned ?? false,
+            ultimaColeta: updated.plans.estagiario?.lastCollect ?? null,
+            dataInicio: updated.plans.estagiario?.startDate ?? null,
+          },
+          ferro: { ativo: updated.plans.ferro?.owned ?? false, ultimaColeta: updated.plans.ferro?.lastCollect ?? null },
+          cox:   { ativo: updated.plans.cox?.owned   ?? false, ultimaColeta: updated.plans.cox?.lastCollect   ?? null },
+          sc:    { ativo: updated.plans.sc?.owned    ?? false, ultimaColeta: updated.plans.sc?.lastCollect    ?? null },
         },
         transacoes:    updated.transactions,
         levantamentos: updated.withdrawals,
