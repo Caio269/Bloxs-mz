@@ -574,7 +574,7 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
     setTimeout(() => setToast(""), 3000);
   }
 
-  function buyPlan(planId: string, cost: number) {
+  async function buyPlan(planId: string, cost: number) {
     if (cost > 0 && user.balance < cost) {
       showToast("Saldo insuficiente para adquirir este plano.");
       return;
@@ -602,6 +602,62 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
     saveUsers(users);
     onUpdate(updated);
     showToast(cost === 0 ? "✅ Plano Estagiário activado! Ciclo de 30 dias iniciado." : "Plano adquirido com sucesso!");
+
+    // ── Bónus de referência anti-fraude ──────────────────────────────────────
+    // Só paga o bónus ao padrinho quando o indicado compra um plano pago
+    // pela primeira vez. Nunca paga por registo ou plano gratuito.
+    const PAID_PLANS = ["ferro", "cox", "sc"];
+    if (cost > 0 && PAID_PLANS.includes(planId) && !isMockMode && auth.currentUser) {
+      try {
+        const currentUid = auth.currentUser.uid;
+        const userSnap = await get(ref(rtdb, `usuarios/${currentUid}`));
+        if (userSnap.exists()) {
+          const userData = userSnap.val();
+          const padrinhoUid: string | null = userData.padrinhoUid ?? null;
+          const bonusJaPago: boolean = userData.bonusPagoPadrinho === true;
+
+          if (padrinhoUid && !bonusJaPago) {
+            const now = new Date().toISOString();
+            const txId = `ref_bonus_${currentUid.slice(0, 8)}`;
+            const membroId = `mem_${currentUid.slice(0, 8)}`;
+
+            // Crédito atómico ao padrinho
+            const txResult = await runTransaction(
+              ref(rtdb, `usuarios/${padrinhoUid}/saldo`),
+              (saldoAtual) => Number(saldoAtual || 0) + 50
+            );
+
+            if (txResult.committed) {
+              await Promise.all([
+                // Transação de auditoria no padrinho
+                set(ref(rtdb, `usuarios/${padrinhoUid}/transacoes/${txId}`), {
+                  id: txId,
+                  type: "credit",
+                  amount: 50,
+                  description: `Bónus de referência — ${user.name} activou plano ${planId}`,
+                  date: now,
+                }),
+                // Actualiza entrada na equipa do padrinho
+                update(ref(rtdb, `usuarios/${padrinhoUid}/equipa/${membroId}`), {
+                  bonusPago: true,
+                  plan: planId,
+                  planActivatedAt: now,
+                }),
+                // Marca bónus como pago no indicado (evita duplo pagamento)
+                update(ref(rtdb, `usuarios/${currentUid}`), {
+                  bonusPagoPadrinho: true,
+                }),
+              ]);
+              console.log(`[Referência] ✅ 50 MT creditados ao padrinho ${padrinhoUid} — ${user.name} activou ${planId}`);
+            }
+          }
+        }
+      } catch (err) {
+        // Falha no bónus não afecta a compra do plano
+        console.error("[Referência] Erro ao processar bónus de referência:", err);
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
   }
 
   function collectProfit(planId: string, daily: number) {
@@ -1399,8 +1455,11 @@ function EquipaTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => void
       <div className="glass-card" style={{ padding: "20px", marginBottom: 16, textAlign: "center" }}>
         <p style={{ fontSize: 24, marginBottom: 8 }}>👥</p>
         <p style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>Programa de Referências</p>
-        <p style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 16 }}>
-          Ganhe 50 MT por cada membro que convidar
+        <p style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 4 }}>
+          Ganhe 50 MT por cada membro que activar um plano pago
+        </p>
+        <p style={{ fontSize: 11, color: "rgba(250,204,21,0.6)", marginBottom: 16 }}>
+          ⚠️ O bónus só é creditado após o seu indicado comprar um plano pago (Ferro, Cox ou S.C.)
         </p>
         <div style={{
           background: "rgba(163,230,53,0.06)", border: "1px solid rgba(163,230,53,0.2)",

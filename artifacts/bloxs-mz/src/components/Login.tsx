@@ -5,7 +5,7 @@ import {
   updateProfile,
   AuthError,
 } from "firebase/auth";
-import { ref, set, get, update, runTransaction, query as rtdbQuery, orderByChild, equalTo } from "firebase/database";
+import { ref, set, get, update, query as rtdbQuery, orderByChild, equalTo } from "firebase/database";
 import { auth, rtdb } from "../firebase";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -118,11 +118,11 @@ export default function Login({ onSuccess, isMockMode = false, onMockLogin }: Pr
         ultimoAcesso: now,
       });
 
-      // ── Bónus de referência ──────────────────────────────────────────────────
-      // Credita +50 MT ao padrinho imediatamente após o cadastro do indicado,
-      // sem exigir depósito ou plano activo.
+      // ── Registo de referência (SEM bónus imediato) ───────────────────────────
+      // O bónus de 50 MT só é creditado quando o indicado activar um plano pago.
+      // Aqui apenas registamos o indicado na equipa do padrinho (sem crédito).
       if (padrinhoID && padrinhoID !== newUserId) {
-        await creditarBonusPadrinho({
+        await registarIndicadoSemBonus({
           padrinhoID,
           indicadoUid: firebaseUser.uid,
           indicadoNome: name.trim(),
@@ -142,12 +142,15 @@ export default function Login({ onSuccess, isMockMode = false, onMockLogin }: Pr
   }
 
   /**
-   * Encontra o padrinho pelo ID curto e credita os 50 MT.
+   * Regista o indicado na equipa do padrinho SEM creditar o bónus.
+   * O bónus de 50 MT só é pago quando o indicado activar um plano pago
+   * (ferro, cox ou sc) pela primeira vez — ver buyPlan() em App.tsx.
+   *
    * Usa duas estratégias para encontrar o padrinho:
    *   1. Query indexada (orderByChild "id") — rápida
    *   2. Scan completo de todos os utilizadores — fallback robusto
    */
-  async function creditarBonusPadrinho({
+  async function registarIndicadoSemBonus({
     padrinhoID,
     indicadoUid,
     indicadoNome,
@@ -169,7 +172,6 @@ export default function Login({ onSuccess, isMockMode = false, onMockLogin }: Pr
         padrinhoData = Object.values(snap.val())[0] as Record<string, any>;
       } else {
         // ── Estratégia 2: scan completo (fallback) ────────────────────────
-        // Necessário se a query falhou por falta de índice ou dado inconsistente
         const allSnap = await get(ref(rtdb, "usuarios"));
         if (allSnap.exists()) {
           const allUsers = allSnap.val() as Record<string, Record<string, any>>;
@@ -189,60 +191,44 @@ export default function Login({ onSuccess, isMockMode = false, onMockLogin }: Pr
         return;
       }
 
-      // Auto-referência: padrinho não pode ser o próprio indicado
+      // Auto-referência bloqueada
       if (padrinhoUid === indicadoUid) {
-        console.warn("[Referência] Auto-referência detectada — bónus não creditado.");
+        console.warn("[Referência] Auto-referência detectada — registo ignorado.");
         return;
       }
 
-      // Previne duplicado: verifica se o indicado já está na equipa do padrinho
+      // Previne duplicado
       const equipaExistente: Record<string, any> = padrinhoData.equipa ?? {};
       const jaIndicado = Object.values(equipaExistente).some(
         (m: any) => m.uid === indicadoUid
       );
       if (jaIndicado) {
-        console.warn("[Referência] Indicado já registado na equipa — bónus não creditado.");
+        console.warn("[Referência] Indicado já registado na equipa — registo ignorado.");
         return;
       }
 
       const now = new Date().toISOString();
-      const txId    = `ref_${indicadoUid.slice(0, 8)}`;
       const membroId = `mem_${indicadoUid.slice(0, 8)}`;
 
-      // 1. Saldo atómico via runTransaction (garante consistência mesmo com escrita concorrente)
-      const txResult = await runTransaction(ref(rtdb, `usuarios/${padrinhoUid}/saldo`), (saldoAtual) =>
-        Number(saldoAtual || 0) + 50
-      );
-      if (!txResult.committed) {
-        console.error("[Referência] runTransaction não foi committed — saldo não alterado.");
-        return;
-      }
-
-      // 2. Equipa + transacção em paralelo (usando set com chave estável para ser idempotente)
+      // Adiciona à equipa (bonusPago: false — aguarda plano pago)
       await Promise.all([
         set(ref(rtdb, `usuarios/${padrinhoUid}/equipa/${membroId}`), {
           uid: indicadoUid,
           name: indicadoNome,
           joinDate: now,
-          plan: "Novo membro",
-        }),
-        set(ref(rtdb, `usuarios/${padrinhoUid}/transacoes/${txId}`), {
-          id: txId,
-          type: "credit",
-          amount: 50,
-          description: `Bónus de referência — ${indicadoNome}`,
-          date: now,
+          plan: "Aguarda plano pago",
+          bonusPago: false,
         }),
         update(ref(rtdb, `usuarios/${indicadoUid}`), {
           padrinhoId: padrinhoID,
           padrinhoUid,
+          bonusPagoPadrinho: false,
         }),
       ]);
 
-      console.log(`[Referência] ✅ 50 MT creditados ao padrinho ${padrinhoUid} (ID: ${padrinhoID})`);
+      console.log(`[Referência] ✅ Indicado registado na equipa do padrinho ${padrinhoUid}. Bónus pendente até plano pago.`);
     } catch (err) {
-      // Falha no bónus não impede o utilizador de usar a conta
-      console.error("[Referência] Erro ao creditar bónus:", err);
+      console.error("[Referência] Erro ao registar indicado:", err);
     }
   }
 
