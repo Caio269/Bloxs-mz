@@ -603,11 +603,16 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
     onUpdate(updated);
     showToast(cost === 0 ? "✅ Plano Estagiário activado! Ciclo de 30 dias iniciado." : "Plano adquirido com sucesso!");
 
-    // ── Bónus de referência anti-fraude ──────────────────────────────────────
+    // ── Bónus de indicação (promoção 1 mês) ──────────────────────────────────
     // Só paga o bónus ao padrinho quando o indicado compra um plano pago
     // pela primeira vez. Nunca paga por registo ou plano gratuito.
-    const PAID_PLANS = ["ferro", "cox", "sc"];
-    if (cost > 0 && PAID_PLANS.includes(planId) && !isMockMode && auth.currentUser) {
+    const BONUS_POR_PLANO: Record<string, { base: number; extra: number; familia: string }> = {
+      ferro: { base: 150, extra: 50, familia: "Família Ferro" },
+      cox:   { base: 225, extra: 50, familia: "Família Cox"   },
+      sc:    { base: 2250, extra: 50, familia: "Família S.C"  },
+    };
+
+    if (cost > 0 && planId in BONUS_POR_PLANO && !isMockMode && auth.currentUser) {
       try {
         const currentUid = auth.currentUser.uid;
         const userSnap = await get(ref(rtdb, `usuarios/${currentUid}`));
@@ -620,11 +625,13 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
             const now = new Date().toISOString();
             const txId = `ref_bonus_${currentUid.slice(0, 8)}`;
             const membroId = `mem_${currentUid.slice(0, 8)}`;
+            const { base, extra, familia } = BONUS_POR_PLANO[planId];
+            const totalBonus = base + extra;
 
             // Crédito atómico ao padrinho
             const txResult = await runTransaction(
               ref(rtdb, `usuarios/${padrinhoUid}/saldo`),
-              (saldoAtual) => Number(saldoAtual || 0) + 50
+              (saldoAtual) => Number(saldoAtual || 0) + totalBonus
             );
 
             if (txResult.committed) {
@@ -633,8 +640,8 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
                 set(ref(rtdb, `usuarios/${padrinhoUid}/transacoes/${txId}`), {
                   id: txId,
                   type: "credit",
-                  amount: 50,
-                  description: `Bónus de referência — ${user.name} activou plano ${planId}`,
+                  amount: totalBonus,
+                  description: `Bónus de Indicação — ${familia} (${base} MT + ${extra} MT bónus)`,
                   date: now,
                 }),
                 // Actualiza entrada na equipa do padrinho
@@ -648,13 +655,13 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
                   bonusPagoPadrinho: true,
                 }),
               ]);
-              console.log(`[Referência] ✅ 50 MT creditados ao padrinho ${padrinhoUid} — ${user.name} activou ${planId}`);
+              console.log(`[Indicação] ✅ ${totalBonus} MT creditados ao padrinho ${padrinhoUid} — ${user.name} activou ${familia}`);
             }
           }
         }
       } catch (err) {
         // Falha no bónus não afecta a compra do plano
-        console.error("[Referência] Erro ao processar bónus de referência:", err);
+        console.error("[Indicação] Erro ao processar bónus de indicação:", err);
       }
     }
     // ─────────────────────────────────────────────────────────────────────────
