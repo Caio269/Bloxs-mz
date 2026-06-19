@@ -332,6 +332,30 @@ function AuthScreen({ onLogin }: { onLogin: (u: User) => void }) {
   );
 }
 
+// ── Banner Promoção 1 Mês ─────────────────────────────────────────────────────
+function PromoBanner() {
+  const [visible, setVisible] = React.useState(true);
+  if (!visible) return null;
+  return (
+    <div className="promo-banner">
+      <div className="promo-banner-shimmer" />
+      <button className="promo-banner-close" onClick={() => setVisible(false)} aria-label="Fechar">✕</button>
+      <div className="promo-banner-inner">
+        <span className="promo-banner-icon">🎉</span>
+        <div>
+          <p className="promo-banner-title">1 Mês de Funcionamento!</p>
+          <p className="promo-banner-sub">Bónus de Indicação Aumentado — só por tempo limitado</p>
+          <div className="promo-banner-pills">
+            <span className="promo-pill promo-pill-ferro">Ferro · 200 MT</span>
+            <span className="promo-pill promo-pill-cox">Cox · 275 MT</span>
+            <span className="promo-pill promo-pill-sc">S.C · 2 300 MT</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Dashboard Header ──────────────────────────────────────────────────────────
 function DashboardHeader({ user }: { user: User }) {
   return (
@@ -713,6 +737,7 @@ function FamiliasTab({ user, onUpdate }: { user: User; onUpdate: (u: User) => vo
   return (
     <div className="scrollable fade-in" style={{ flex: 1, padding: "16px" }}>
       {toast && <Toast msg={toast} />}
+      <PromoBanner />
       <BalanceCard balance={user.balance} />
       <FundCards />
       <RetentionBar retention={user.retention} max={user.retentionMax} />
