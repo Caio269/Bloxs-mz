@@ -334,7 +334,7 @@ function AuthScreen({ onLogin }: { onLogin: (u: User) => void }) {
 
 // ── Banner Promoção 1 Mês ─────────────────────────────────────────────────────
 function PromoBanner() {
-  const [visible, setVisible] = React.useState(true);
+  const [visible, setVisible] = useState(true);
   if (!visible) return null;
   return (
     <div className="promo-banner">
